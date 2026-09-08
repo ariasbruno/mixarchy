@@ -1,0 +1,12 @@
+/target/
+/bin/
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.log
+session.json
+login.url
+ui_state.json
+.codegraph/

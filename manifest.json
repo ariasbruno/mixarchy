@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "ariasbruno.mixarchy",
+  "name": "Mixarchy",
+  "version": "1.0.0",
+  "author": "ariasbruno",
+  "license": "MIT",
+  "description": "Minimalist local HiRes audio player for Omarchy",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Mixarchy",
+    "description": "Local HiRes audio player",
+    "category": "Media",
+    "aliases": [
+      "mixarchy",
+      "music",
+      "player"
+    ],
+    "defaultSection": "right",
+    "allowMultiple": false
+  },
+  "homepage": "https://github.com/ariasbruno/mixarchy",
+  "repository": "https://github.com/ariasbruno/mixarchy"
+}
