@@ -87,7 +87,7 @@ Measured on Arch Linux / Omarchy desktop:
   ```
 
 > [!NOTE]
-> Mixarchy's repository contains 100% auditable source code with automated CI/CD builds via GitHub Actions. End-users do **not** need Rust or Cargo installed; `install.sh` and the Quickshell UI automatically fetch the official precompiled `x86_64` binary from GitHub Releases (or compile from source if `cargo` is present).
+> Mixarchy's repository contains 100% auditable source code with automated CI/CD builds via GitHub Actions. End-users do **not** need Rust or Cargo installed; `install.sh` and the Quickshell UI automatically fetch the pinned, immutable precompiled `x86_64` release binary verified against an exact SHA-256 checksum (or compile from source if `cargo` is present).
 
 ---
 

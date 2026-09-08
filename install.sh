@@ -55,25 +55,35 @@ elif [ -x "$PLUGIN_SRC/target/release/mixarchy-ctl" ]; then
   echo "  ✓ Staged release binary into bin/"
   DOWNLOAD_OK=0
   if command -v curl >/dev/null 2>&1; then
-    echo "  -> Downloading precompiled mixarchy-ctl binary from GitHub Releases..."
+    echo "  -> Downloading precompiled mixarchy-ctl binary (v1.0.0)..."
+    RELEASE_TAG="v1.0.0"
+    EXPECTED_SHA256="d0c66ca6859d4c1777d05c1b508e88bc69a40322f9d0696d7e7e0c525eebec25"
+    MAX_BYTES=10485760 # 10 MiB limit
+    TMP_BIN="$PLUGIN_SRC/bin/mixarchy-ctl.tmp.$$"
+
     mkdir -p "$PLUGIN_SRC/bin"
-    if curl -fsSL "https://github.com/ariasbruno/mixarchy/releases/latest/download/mixarchy-ctl" -o "$PLUGIN_SRC/bin/mixarchy-ctl" && \
-       curl -fsSL "https://github.com/ariasbruno/mixarchy/releases/latest/download/checksums.txt" -o "$PLUGIN_SRC/bin/checksums.txt" && \
+    rm -f "$TMP_BIN"
+
+    if curl -fsSL \
+         --connect-timeout 10 \
+         --max-time 120 \
+         --max-filesize "$MAX_BYTES" \
+         "https://github.com/ariasbruno/mixarchy/releases/download/${RELEASE_TAG}/mixarchy-ctl" \
+         -o "$TMP_BIN" && \
        command -v sha256sum >/dev/null 2>&1; then
-      EXPECTED=$(awk '{print $1}' "$PLUGIN_SRC/bin/checksums.txt")
-      ACTUAL=$(sha256sum "$PLUGIN_SRC/bin/mixarchy-ctl" | awk '{print $1}')
-      if [ -n "$EXPECTED" ] && [ -n "$ACTUAL" ] && [ "$EXPECTED" = "$ACTUAL" ]; then
-        rm -f "$PLUGIN_SRC/bin/checksums.txt"
-        chmod +x "$PLUGIN_SRC/bin/mixarchy-ctl"
-        echo "  ✓ Downloaded release binary verified (sha256)"
+      ACTUAL_SHA256=$(sha256sum "$TMP_BIN" | awk '{print $1}')
+      if [ -n "$ACTUAL_SHA256" ] && [ "$EXPECTED_SHA256" = "$ACTUAL_SHA256" ]; then
+        chmod 755 "$TMP_BIN"
+        mv -f "$TMP_BIN" "$PLUGIN_SRC/bin/mixarchy-ctl"
+        echo "  ✓ Pinned release binary ($RELEASE_TAG) verified and installed (sha256)"
         DOWNLOAD_OK=1
       else
-        echo "  ! Warning: Checksum mismatch. Downloaded binary may be corrupted or tampered."
-        rm -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$PLUGIN_SRC/bin/checksums.txt"
+        echo "  ! Error: Checksum mismatch. Expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
+        rm -f "$TMP_BIN"
       fi
     else
-      echo "  ! Release binary download not available or failed."
-      rm -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$PLUGIN_SRC/bin/checksums.txt"
+      echo "  ! Release binary download failed or exceeded safety limits."
+      rm -f "$TMP_BIN"
     fi
   fi
 

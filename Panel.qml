@@ -261,25 +261,18 @@ Panel {
     }
   }
 
+  readonly property string releaseTag: "v1.0.0"
+  readonly property string expectedSha256: "d0c66ca6859d4c1777d05c1b508e88bc69a40322f9d0696d7e7e0c525eebec25"
+
   Process {
     id: downloadFetchProc
     command: [
       "curl", "-fsSL",
-      "https://github.com/ariasbruno/mixarchy/releases/latest/download/mixarchy-ctl",
-      "-o", root.pluginDir + "/bin/mixarchy-ctl"
-    ]
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0) downloadFetchSumProc.running = true
-      else downloadError()
-    }
-  }
-
-  Process {
-    id: downloadFetchSumProc
-    command: [
-      "curl", "-fsSL",
-      "https://github.com/ariasbruno/mixarchy/releases/latest/download/checksums.txt",
-      "-o", root.pluginDir + "/bin/checksums.txt"
+      "--connect-timeout", "10",
+      "--max-time", "120",
+      "--max-filesize", "10485760",
+      "https://github.com/ariasbruno/mixarchy/releases/download/" + root.releaseTag + "/mixarchy-ctl",
+      "-o", root.pluginDir + "/bin/mixarchy-ctl.tmp"
     ]
     onExited: function(exitCode, exitStatus) {
       if (exitCode === 0) downloadVerifyProc.running = true
@@ -289,26 +282,23 @@ Panel {
 
   Process {
     id: downloadVerifyProc
-    // Verify sha256 without shell interpolation: pluginDir is passed as argv, never interpolated.
-    // On match: remove checksums.txt and exit 0. On mismatch: delete both and exit 1.
+    // Verify pinned sha256 on temporary file without shell interpolation.
+    // If valid: chmod 755 and atomic mv to destination.
+    // If invalid: delete temporary file and exit non-zero.
     command: ["bash", "-c",
-      "exp=$(awk '{print $1}' \"$1\"); act=$(sha256sum \"$2\" | awk '{print $1}'); if [ -n \"$exp\" ] && [ -n \"$act\" ] && [ \"$exp\" = \"$act\" ]; then rm -f \"$1\"; exit 0; else rm -f \"$1\" \"$2\"; exit 1; fi",
-      "verify", root.pluginDir + "/bin/checksums.txt", root.pluginDir + "/bin/mixarchy-ctl"]
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0) downloadChmodProc.running = true
-      else downloadError()
-    }
-  }
-
-  Process {
-    id: downloadChmodProc
-    command: ["chmod", "+x", root.pluginDir + "/bin/mixarchy-ctl"]
+      "act=$(sha256sum \"$1\" 2>/dev/null | awk '{print $1}'); if [ -n \"$act\" ] && [ \"$act\" = \"$2\" ]; then chmod 755 \"$1\" && mv -f \"$1\" \"$3\"; exit 0; else rm -f \"$1\"; exit 1; fi",
+      "verify-pinned",
+      root.pluginDir + "/bin/mixarchy-ctl.tmp",
+      root.expectedSha256,
+      root.pluginDir + "/bin/mixarchy-ctl"]
     onExited: function(exitCode, exitStatus) {
       root.isBuilding = false
       if (exitCode === 0) {
         root.ctlPath = root.pluginDir + "/bin/mixarchy-ctl"
         root.refreshStatus()
         root.refreshLibrary()
+      } else {
+        downloadError()
       }
     }
   }
