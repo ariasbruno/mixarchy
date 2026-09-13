@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use rand::seq::SliceRandom;
@@ -11,6 +11,7 @@ use rand::thread_rng;
 
 use crate::library::{load_library, load_state, save_state};
 use crate::models::{format_duration, LibraryData, TrackItem};
+use crate::trusted::trusted_command;
 
 pub fn socket_path() -> PathBuf {
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
@@ -46,7 +47,15 @@ pub fn ensure_mpv() -> bool {
         return true;
     }
 
-    let _ = Command::new("mpv")
+    // Resolve mpv from fixed root-owned system locations with
+    // regular-file/owner/mode and directory-chain checks, and hand it the
+    // same fixed allow-listed environment used on every QML process boundary
+    // (see crate::trusted). Never resolve or inherit through the session
+    // environment.
+    let Some(mut cmd) = trusted_command("mpv") else {
+        return false;
+    };
+    let _ = cmd
         .process_group(0)
         .args([
             "--idle=yes",

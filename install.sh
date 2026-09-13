@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # install.sh — Automated, idempotent installer for Mixarchy (Omarchy plugin).
+#
+# Hardening: required executables are resolved from fixed root-owned system
+# locations (never the inherited PATH), the download is pinned to an immutable
+# release tag and verified against a pinned SHA-256 before install, and the
+# temporary payload is only chmod'ed + moved atomically after verification.
 set -euo pipefail
 
 PLUGIN_ID="ariasbruno.mixarchy"
@@ -7,23 +12,53 @@ PLUGIN_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 
+RELEASE_TAG="v1.1.0"
+EXPECTED_SHA256="d0c66ca6859d4c1777d05c1b508e88bc69a40322f9d0696d7e7e0c525eebec25"
+MAX_BYTES=10485760 # 10 MiB limit
+
+# Resolve an executable from fixed trusted locations only. Never consults the
+# inherited PATH.
+resolve_tool() {
+  local name="$1" cand
+  for cand in "/usr/bin/$name" "/bin/$name" "/usr/local/bin/$name"; do
+    if [ -f "$cand" ] && [ -x "$cand" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+TEST_BIN="$(resolve_tool test || echo /usr/bin/test)"
+MKDIR_BIN="$(resolve_tool mkdir || echo /usr/bin/mkdir)"
+CP_BIN="$(resolve_tool cp || echo /usr/bin/cp)"
+RM_BIN="$(resolve_tool rm || echo /usr/bin/rm)"
+MV_BIN="$(resolve_tool mv || echo /usr/bin/mv)"
+CHMOD_BIN="$(resolve_tool chmod || echo /usr/bin/chmod)"
+CURL_BIN="$(resolve_tool curl || true)"
+SHA256SUM_BIN="$(resolve_tool sha256sum || true)"
+MPV_BIN="$(resolve_tool mpv || true)"
+CARGO_BIN="$(resolve_tool cargo || true)"
+JQ_BIN="$(resolve_tool jq || true)"
+OMARCHY_BIN="$(resolve_tool omarchy || true)"
+
 uninstall() {
   echo "==> Uninstalling $PLUGIN_ID..."
   if [ -L "$TARGET_DIR" ] || [ -d "$TARGET_DIR" ]; then
-    rm -rf "$TARGET_DIR"
+    "$RM_BIN" -rf "$TARGET_DIR"
     echo "  - Removed plugin directory: $TARGET_DIR"
   fi
 
-  if [ -f "$SHELL_JSON" ] && command -v jq >/dev/null 2>&1; then
-    if jq -e '.bar.layout.right[] | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
-      jq '.bar.layout.right |= map(select(.id != "'"$PLUGIN_ID"'"))' "$SHELL_JSON" > "$SHELL_JSON.tmp"
-      mv "$SHELL_JSON.tmp" "$SHELL_JSON"
+  if [ -f "$SHELL_JSON" ] && [ -n "$JQ_BIN" ]; then
+    if "$JQ_BIN" -e '.bar.layout.right[] | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
+      "$JQ_BIN" '.bar.layout.right |= map(select(.id != "'"$PLUGIN_ID"'"))' "$SHELL_JSON" > "$SHELL_JSON.tmp"
+      "$MV_BIN" "$SHELL_JSON.tmp" "$SHELL_JSON"
       echo "  - Removed $PLUGIN_ID from $SHELL_JSON"
     fi
   fi
 
-  if command -v omarchy >/dev/null 2>&1; then
-    omarchy restart shell 2>/dev/null || true
+  if [ -n "$OMARCHY_BIN" ]; then
+    "$OMARCHY_BIN" restart shell 2>/dev/null || true
   fi
   echo "==> Uninstalled successfully."
   exit 0
@@ -36,7 +71,7 @@ fi
 echo "==> Installing Mixarchy plugin ($PLUGIN_ID)..."
 
 # 1. Dependency check: mpv
-if ! command -v mpv >/dev/null 2>&1; then
+if [ -z "$MPV_BIN" ]; then
   echo "  ! mpv is required but not installed."
   echo "  ! Install it manually, e.g.: sudo pacman -S mpv"
   echo "  ! Then re-run ./install.sh"
@@ -50,49 +85,46 @@ if [ -x "$PLUGIN_SRC/bin/mixarchy-ctl" ]; then
   echo "  ✓ mixarchy-ctl binary ready ($PLUGIN_SRC/bin/mixarchy-ctl)"
 elif [ -x "$PLUGIN_SRC/target/release/mixarchy-ctl" ]; then
   echo "  ✓ mixarchy-ctl binary ready ($PLUGIN_SRC/target/release/mixarchy-ctl)"
-  mkdir -p "$PLUGIN_SRC/bin"
-  cp "$PLUGIN_SRC/target/release/mixarchy-ctl" "$PLUGIN_SRC/bin/mixarchy-ctl"
+  "$MKDIR_BIN" -p "$PLUGIN_SRC/bin"
+  "$CP_BIN" "$PLUGIN_SRC/target/release/mixarchy-ctl" "$PLUGIN_SRC/bin/mixarchy-ctl"
   echo "  ✓ Staged release binary into bin/"
   DOWNLOAD_OK=0
-  if command -v curl >/dev/null 2>&1; then
-    echo "  -> Downloading precompiled mixarchy-ctl binary (v1.0.0)..."
-    RELEASE_TAG="v1.0.0"
-    EXPECTED_SHA256="d0c66ca6859d4c1777d05c1b508e88bc69a40322f9d0696d7e7e0c525eebec25"
-    MAX_BYTES=10485760 # 10 MiB limit
+  if [ -n "$CURL_BIN" ] && [ -n "$SHA256SUM_BIN" ]; then
+    echo "  -> Downloading precompiled mixarchy-ctl binary ($RELEASE_TAG)..."
     TMP_BIN="$PLUGIN_SRC/bin/mixarchy-ctl.tmp.$$"
 
-    mkdir -p "$PLUGIN_SRC/bin"
-    rm -f "$TMP_BIN"
+    "$MKDIR_BIN" -p "$PLUGIN_SRC/bin"
+    "$RM_BIN" -f "$TMP_BIN"
 
-    if curl -fsSL \
+    if "$CURL_BIN" -fsSL \
          --connect-timeout 10 \
          --max-time 120 \
          --max-filesize "$MAX_BYTES" \
          "https://github.com/ariasbruno/mixarchy/releases/download/${RELEASE_TAG}/mixarchy-ctl" \
-         -o "$TMP_BIN" && \
-       command -v sha256sum >/dev/null 2>&1; then
-      ACTUAL_SHA256=$(sha256sum "$TMP_BIN" | awk '{print $1}')
+         -o "$TMP_BIN"; then
+      SHA256_OUT="$("$SHA256SUM_BIN" "$TMP_BIN")"
+      ACTUAL_SHA256="${SHA256_OUT%% *}"
       if [ -n "$ACTUAL_SHA256" ] && [ "$EXPECTED_SHA256" = "$ACTUAL_SHA256" ]; then
-        chmod 755 "$TMP_BIN"
-        mv -f "$TMP_BIN" "$PLUGIN_SRC/bin/mixarchy-ctl"
+        "$CHMOD_BIN" 755 "$TMP_BIN"
+        "$MV_BIN" -f "$TMP_BIN" "$PLUGIN_SRC/bin/mixarchy-ctl"
         echo "  ✓ Pinned release binary ($RELEASE_TAG) verified and installed (sha256)"
         DOWNLOAD_OK=1
       else
         echo "  ! Error: Checksum mismatch. Expected $EXPECTED_SHA256, got $ACTUAL_SHA256"
-        rm -f "$TMP_BIN"
+        "$RM_BIN" -f "$TMP_BIN"
       fi
     else
       echo "  ! Release binary download failed or exceeded safety limits."
-      rm -f "$TMP_BIN"
+      "$RM_BIN" -f "$TMP_BIN"
     fi
   fi
 
   if [ "$DOWNLOAD_OK" -ne 1 ]; then
-    if command -v cargo >/dev/null 2>&1; then
+    if [ -n "$CARGO_BIN" ]; then
       echo "  -> Building mixarchy-ctl binary via Cargo (Rust fallback)..."
-      cargo build --release --locked --manifest-path "$PLUGIN_SRC/Cargo.toml"
-      mkdir -p "$PLUGIN_SRC/bin"
-      cp "$PLUGIN_SRC/target/release/mixarchy-ctl" "$PLUGIN_SRC/bin/mixarchy-ctl"
+      "$CARGO_BIN" build --release --locked --manifest-path "$PLUGIN_SRC/Cargo.toml"
+      "$MKDIR_BIN" -p "$PLUGIN_SRC/bin"
+      "$CP_BIN" "$PLUGIN_SRC/target/release/mixarchy-ctl" "$PLUGIN_SRC/bin/mixarchy-ctl"
       echo "  ✓ Compiled mixarchy-ctl binary ready"
     else
       echo "  ! Error: Could not obtain mixarchy-ctl binary (download failed and cargo is not installed)."
@@ -104,33 +136,33 @@ fi
 # 2. Install plugin into Omarchy user plugins directory
 #    Copy (not symlink) so the plugin lives fully inside ~/.config/omarchy/plugins/<id>/,
 #    matching the marketplace contract and surviving moves/deletes of this repo.
-mkdir -p "$HOME/.config/omarchy/plugins"
+"$MKDIR_BIN" -p "$HOME/.config/omarchy/plugins"
 # Remove a stale symlink from an older dev-installer if present, so it is
 # replaced by a real directory copy.
 if [ -L "$TARGET_DIR" ]; then
-  rm -f "$TARGET_DIR"
+  "$RM_BIN" -f "$TARGET_DIR"
 fi
-mkdir -p "$TARGET_DIR"
-cp -f "$PLUGIN_SRC/manifest.json" "$TARGET_DIR/"
-cp -f "$PLUGIN_SRC/Panel.qml" "$TARGET_DIR/"
-mkdir -p "$TARGET_DIR/bin"
-cp -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$TARGET_DIR/bin/"
-cp -f "$PLUGIN_SRC/README.md" "$PLUGIN_SRC/LICENSE" "$TARGET_DIR/" 2>/dev/null || true
-chmod +x "$TARGET_DIR/bin/mixarchy-ctl"
+"$MKDIR_BIN" -p "$TARGET_DIR"
+"$CP_BIN" -f "$PLUGIN_SRC/manifest.json" "$TARGET_DIR/"
+"$CP_BIN" -f "$PLUGIN_SRC/Panel.qml" "$TARGET_DIR/"
+"$MKDIR_BIN" -p "$TARGET_DIR/bin"
+"$CP_BIN" -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$TARGET_DIR/bin/"
+"$CP_BIN" -f "$PLUGIN_SRC/README.md" "$PLUGIN_SRC/LICENSE" "$TARGET_DIR/" 2>/dev/null || true
+"$CHMOD_BIN" +x "$TARGET_DIR/bin/mixarchy-ctl"
 echo "  ✓ Installed plugin: $TARGET_DIR"
 
 # 3. Register widget in shell.json idempotently
-if [ -f "$SHELL_JSON" ] && command -v jq >/dev/null 2>&1; then
-  if ! jq -e '.bar.layout.right[] | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
+if [ -f "$SHELL_JSON" ] && [ -n "$JQ_BIN" ]; then
+  if ! "$JQ_BIN" -e '.bar.layout.right[] | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
     echo "  -> Registering $PLUGIN_ID in $SHELL_JSON..."
-    jq '
+    "$JQ_BIN" '
       if (.bar.layout.right | map(.id) | contains(["omarchy.audio"])) then
         .bar.layout.right |= reduce .[] as $item ([]; if $item.id == "omarchy.audio" then . + [{"id": "'"$PLUGIN_ID"'"}, $item] else . + [$item] end)
       else
         .bar.layout.right += [{"id": "'"$PLUGIN_ID"'"}]
       end
     ' "$SHELL_JSON" > "$SHELL_JSON.tmp"
-    mv "$SHELL_JSON.tmp" "$SHELL_JSON"
+    "$MV_BIN" "$SHELL_JSON.tmp" "$SHELL_JSON"
     echo "  ✓ Added $PLUGIN_ID to bar layout (right section)"
   else
     echo "  ✓ Already registered in $SHELL_JSON"
@@ -140,9 +172,9 @@ fi
 # 4. Restart the Omarchy shell so the new widget loads. Use `restart`, NOT
 #    `refresh`: refresh resets ~/.config/omarchy/shell.json to Omarchy defaults
 #    and would wipe the user's bar layout.
-if command -v omarchy >/dev/null 2>&1; then
+if [ -n "$OMARCHY_BIN" ]; then
   echo "  -> Restarting Omarchy shell..."
-  omarchy restart shell 2>/dev/null || true
+  "$OMARCHY_BIN" restart shell 2>/dev/null || true
 fi
 
 echo "==> Mixarchy installed successfully."

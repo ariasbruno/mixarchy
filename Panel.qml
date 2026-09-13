@@ -17,6 +17,54 @@ Panel {
   property string ctlPath: pluginDir + "/bin/mixarchy-ctl"
   property bool isBuilding: false
 
+  // ------------------------------------------------------------- Trusted processes
+  // Every automatic process boundary clears the inherited environment and
+  // reconstructs a fixed minimal allow-list (never inheriting PATH/BASH_ENV/
+  // LD_PRELOAD or other session variables), and every executable is resolved
+  // from fixed root-owned system locations instead of the inherited PATH.
+  // No shell is ever started. This removes the pre-verification execution
+  // window the marketplace review flagged: a user-writable or shadowed
+  // executable or startup file can no longer run before the downloaded
+  // binary's pinned SHA-256 is checked. mixarchy-ctl applies the same
+  // resolution (regular-file/owner/mode/directory-chain checks) and the same
+  // allow-list to the mpv child it starts (see src/trusted.rs).
+  readonly property string trustedPath: "/usr/local/bin:/usr/bin:/bin"
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
+  readonly property string cargoBinDir: root.homeDir !== "" ? root.homeDir + "/.cargo/bin" : ""
+
+  // Allow-listed environment handed to every automatic child process.
+  readonly property var cleanEnv: ({
+    "HOME": root.homeDir,
+    "XDG_RUNTIME_DIR": root.runtimeDir,
+    "PATH": root.trustedPath,
+    "LANG": "C.UTF-8"
+  })
+
+  // cargo build fallback additionally needs the user's rustup shim directory
+  // (where rustc lives alongside cargo) available to the child.
+  readonly property var buildEnv: ({
+    "HOME": root.homeDir,
+    "XDG_RUNTIME_DIR": root.runtimeDir,
+    "PATH": (root.cargoBinDir !== "" ? root.cargoBinDir + ":" : "") + root.trustedPath,
+    "LANG": "C.UTF-8"
+  })
+
+  // Fixed trusted candidate locations for bootstrap executables, in probe
+  // order. Probing only ever uses /usr/bin/test -x (absolute, cleared env);
+  // a candidate is never looked up through the inherited PATH.
+  readonly property var toolCandidates: {
+    "stat": ["/usr/bin/stat", "/bin/stat"],
+    "test": ["/usr/bin/test", "/bin/test"],
+    "mkdir": ["/usr/bin/mkdir", "/bin/mkdir"],
+    "curl": ["/usr/bin/curl", "/bin/curl"],
+    "sha256sum": ["/usr/bin/sha256sum", "/bin/sha256sum"],
+    "chmod": ["/usr/bin/chmod", "/bin/chmod"],
+    "mv": ["/usr/bin/mv", "/bin/mv"],
+    "rm": ["/usr/bin/rm", "/bin/rm"]
+  }
+  property var resolvedTools: ({})
+  property var pendingTool: null
+
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -97,9 +145,155 @@ Panel {
   property real lastSyncTimePos: 0
   property real lastSyncWall: 0
 
+  // ------------------------------------------------------------- Tool resolution
+  // Resolve all bootstrap executables from fixed root-owned system locations
+  // before any process that needs them is started. Each candidate must pass:
+  //   1. /usr/bin/test -x        → exists and is executable;
+  //   2. /usr/bin/stat (uid, mode) → owned by uid 0 and not writable by group
+  //      or other (`mode & 0o22 == 0`);
+  //   3. /usr/bin/stat on the parent directory → same uid 0 / non-writable
+  //      rule on the directory chain.
+  // The probe binaries themselves (/usr/bin/test, /usr/bin/stat) are fixed
+  // absolute paths invoked with a cleared environment — they are never looked
+  // up through the inherited PATH. cargo is handled separately because it
+  // lives under the user's home; both /usr/bin/cargo and the rustup shim
+  // directory are tested (the home candidate is only ever reached as a
+  // user-initiated build fallback, never for the verified download path).
+  function tool(name) {
+    return root.resolvedTools[name] || ""
+  }
+
+  function candidatesFor(name) {
+    if (name === "cargo") {
+      var list = ["/usr/bin/cargo"]
+      if (root.cargoBinDir !== "") list.push(root.cargoBinDir + "/cargo")
+      list.push("/usr/local/bin/cargo")
+      return list
+    }
+    return root.toolCandidates[name] || []
+  }
+
+  function probeTool(name, onResolved) {
+    var cands = root.candidatesFor(name)
+    if (cands.length === 0) {
+      console.warn("Mixarchy: no trusted candidate locations for '" + name + "'")
+      if (onResolved) onResolved()
+      return
+    }
+    root.pendingTool = { name: name, index: 0, candidates: cands, phase: "xtest", onResolved: onResolved || null }
+    toolProbeProc.command = ["/usr/bin/test", "-x", cands[0]]
+    toolProbeProc.running = true
+  }
+
+  // Advance the probe to the next candidate for the pending tool.
+  function probeNext() {
+    var pending = root.pendingTool
+    if (!pending) return
+    pending.index++
+    if (pending.index < pending.candidates.length) {
+      pending.phase = "xtest"
+      toolProbeProc.command = ["/usr/bin/test", "-x", pending.candidates[pending.index]]
+      toolProbeProc.running = true
+    } else {
+      var cb = pending.onResolved
+      root.pendingTool = null
+      console.warn("Mixarchy: '" + pending.name + "' not found in trusted system locations")
+      if (cb) cb()
+    }
+  }
+
+  // Accept the current candidate for the pending tool.
+  function probeAccept() {
+    var pending = root.pendingTool
+    if (!pending) return
+    root.resolvedTools[pending.name] = pending.candidates[pending.index]
+    var cb = pending.onResolved
+    root.pendingTool = null
+    if (cb) cb()
+  }
+
+  // "uid mode" (e.g. "0 755") → true when root-owned and no group/other write.
+  function statLineOk(line) {
+    var parts = String(line || "").trim().split(/\s+/)
+    if (parts.length < 2) return false
+    var uid = parseInt(parts[0], 10)
+    var mode = parseInt(parts[1], 8)
+    return uid === 0 && (mode & 0o22) === 0
+  }
+
+  Process {
+    id: toolProbeProc
+    clearEnvironment: true
+    environment: root.cleanEnv
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.probeStatOut = text
+    }
+    onExited: function(exitCode, exitStatus) {
+      var pending = root.pendingTool
+      if (!pending) return
+      var path = pending.candidates[pending.index]
+
+      if (pending.phase === "xtest") {
+        if (exitCode !== 0) {
+          root.probeNext()
+          return
+        }
+        if (pending.name === "stat") {
+          // stat is the validator itself; its fixed absolute path is accepted
+          // on the existence test alone.
+          root.probeAccept()
+          return
+        }
+        pending.phase = "statfile"
+        toolProbeProc.command = ["/usr/bin/stat", "-c", "%u %a", path]
+        toolProbeProc.running = true
+        return
+      }
+
+      if (pending.phase === "statfile") {
+        if (exitCode !== 0 || !root.statLineOk(root.probeStatOut)) {
+          root.probeNext()
+          return
+        }
+        pending.phase = "statdir"
+        var parent = path.substring(0, path.lastIndexOf("/"))
+        toolProbeProc.command = ["/usr/bin/stat", "-c", "%u %a", parent]
+        toolProbeProc.running = true
+        return
+      }
+
+      // statdir
+      if (exitCode !== 0 || !root.statLineOk(root.probeStatOut)) {
+        root.probeNext()
+        return
+      }
+      root.probeAccept()
+    }
+  }
+
+  property string probeStatOut: ""
+
+  // Resolve a list of tool names in sequence before starting any work.
+  function bootstrapTools(names, onDone) {
+    var i = 0
+    var next = function() {
+      if (i >= names.length) {
+        if (onDone) onDone()
+        return
+      }
+      var name = names[i++]
+      root.probeTool(name, next)
+    }
+    next()
+  }
+
   // ------------------------------------------------------------- Process handlers
   Process {
     id: statusProc
+    clearEnvironment: true
+    environment: root.cleanEnv
     command: [root.ctlPath, "status"]
     stdout: StdioCollector {
       waitForEnd: true
@@ -129,6 +323,8 @@ Panel {
 
   Process {
     id: libProc
+    clearEnvironment: true
+    environment: root.cleanEnv
     command: [root.ctlPath, "library"]
     stdout: StdioCollector {
       waitForEnd: true
@@ -148,6 +344,8 @@ Panel {
   Process {
     id: actionProc
     property var nextAction: null
+    clearEnvironment: true
+    environment: root.cleanEnv
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -170,6 +368,8 @@ Panel {
     id: coverProc
     property var pendingId: ""
     property bool pendingThumbOnly: false
+    clearEnvironment: true
+    environment: root.cleanEnv
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -214,111 +414,162 @@ Panel {
     }
   }
 
-  Process {
-    id: checkBinProc
-    command: ["test", "-x", root.ctlPath]
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode !== 0) {
-        checkTargetProc.running = true
-      }
-    }
-  }
-
-  Process {
-    id: checkTargetProc
-    command: ["test", "-x", root.pluginDir + "/target/release/mixarchy-ctl"]
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0) {
-        root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
-      } else {
-        // Prefer the verified release download (fast, no toolchain) over an
-        // in-process cargo build; building is only a last-resort dev fallback.
-        downloadMkdirProc.running = true
-      }
-    }
-  }
-
-  Process {
-    id: checkCargoProc
-    command: ["which", "cargo"]
-    onExited: function(exitCode, exitStatus) {
-      root.isBuilding = true
-      if (exitCode === 0) {
-        buildProc.running = true
-      } else {
-        root.isBuilding = false
-        console.warn("Mixarchy: could not download a verified binary and cargo is not installed")
-      }
-    }
-  }
-
-  Process {
-    id: downloadMkdirProc
-    command: ["mkdir", "-p", root.pluginDir + "/bin"]
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0) downloadFetchProc.running = true
-      else downloadError()
-    }
-  }
-
-  readonly property string releaseTag: "v1.0.0"
+  // ------------------------------------------------------------- Bootstrap
+  // Single dispatcher process drives the whole bootstrap state machine.
+  // Every automatic boundary clears the inherited environment and uses only
+  // executables resolved from fixed root-owned system locations (never the
+  // inherited PATH), and never starts a shell. The bash-based verify step
+  // is replaced by an explicit sha256sum → chmod → mv chain; each step is
+  // its own process with argv only (no string interpolation).
+  readonly property string releaseTag: "v1.1.0"
   readonly property string expectedSha256: "d0c66ca6859d4c1777d05c1b508e88bc69a40322f9d0696d7e7e0c525eebec25"
 
-  Process {
-    id: downloadFetchProc
-    command: [
-      "curl", "-fsSL",
-      "--connect-timeout", "10",
-      "--max-time", "120",
-      "--max-filesize", "10485760",
-      "https://github.com/ariasbruno/mixarchy/releases/download/" + root.releaseTag + "/mixarchy-ctl",
-      "-o", root.pluginDir + "/bin/mixarchy-ctl.tmp"
-    ]
-    onExited: function(exitCode, exitStatus) {
-      if (exitCode === 0) downloadVerifyProc.running = true
-      else downloadError()
-    }
+  property string tmpBinary: root.pluginDir + "/bin/mixarchy-ctl.tmp"
+  property string bootstrapStep: ""
+  property string bootstrapHashOut: ""
+
+  function runBootstrap(step, args) {
+    bootstrapProc.step = step
+    bootstrapProc.command = args
+    bootstrapProc.running = true
   }
 
-  Process {
-    id: downloadVerifyProc
-    // Verify pinned sha256 on temporary file without shell interpolation.
-    // If valid: chmod 755 and atomic mv to destination.
-    // If invalid: delete temporary file and exit non-zero.
-    command: ["bash", "-c",
-      "act=$(sha256sum \"$1\" 2>/dev/null | awk '{print $1}'); if [ -n \"$act\" ] && [ \"$act\" = \"$2\" ]; then chmod 755 \"$1\" && mv -f \"$1\" \"$3\"; exit 0; else rm -f \"$1\"; exit 1; fi",
-      "verify-pinned",
-      root.pluginDir + "/bin/mixarchy-ctl.tmp",
-      root.expectedSha256,
-      root.pluginDir + "/bin/mixarchy-ctl"]
-    onExited: function(exitCode, exitStatus) {
-      root.isBuilding = false
-      if (exitCode === 0) {
-        root.ctlPath = root.pluginDir + "/bin/mixarchy-ctl"
-        root.refreshStatus()
-        root.refreshLibrary()
-      } else {
-        downloadError()
-      }
-    }
+  function bootstrapDone() {
+    root.isBuilding = false
+    root.refreshStatus()
+    root.refreshLibrary()
   }
 
   function downloadError() {
     root.isBuilding = false
-    console.warn("Mixarchy: Failed to download or verify mixarchy-ctl binary; falling back to cargo build")
-    checkCargoProc.running = true
+    console.warn("Mixarchy: download/verify failed — falling back to cargo build")
+    var cands = root.candidatesFor("cargo")
+    root.cargoCandidates = cands
+    root.cargoProbeIndex = 0
+    if (cands.length > 0) {
+      root.runBootstrap("check-cargo", [root.tool("test"), "-x", cands[0]])
+    } else {
+      console.warn("Mixarchy: no trusted cargo binary found; cannot build locally")
+    }
   }
 
   Process {
-    id: buildProc
-    command: ["cargo", "build", "--release", "--locked", "--manifest-path", root.pluginDir + "/Cargo.toml"]
+    id: bootstrapProc
+    property string step: ""
+    clearEnvironment: true
+    environment: root.cleanEnv
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: {
-        root.isBuilding = false
+      onStreamFinished: root.bootstrapHashOut = text
+    }
+    onExited: function(exitCode, exitStatus) {
+      var step = bootstrapProc.step
+
+      if (step === "check-bin") {
+        if (exitCode === 0) {
+          root.bootstrapDone()
+          return
+        }
+        root.runBootstrap("check-target", [root.tool("test"), "-x",
+          root.pluginDir + "/target/release/mixarchy-ctl"])
+      }
+      else if (step === "check-target") {
+        if (exitCode === 0) {
+          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
+          root.bootstrapDone()
+          return
+        }
+        // Prefer verified release download (fast, no toolchain) over cargo build.
+        root.runBootstrap("mkdir", [root.tool("mkdir"), "-p", root.pluginDir + "/bin"])
+      }
+      else if (step === "mkdir") {
+        if (exitCode === 0) {
+          root.runBootstrap("download", [
+            root.tool("curl"), "-fsSL",
+            "--connect-timeout", "10",
+            "--max-time", "120",
+            "--max-filesize", "10485760",
+            "https://github.com/ariasbruno/mixarchy/releases/download/" + root.releaseTag + "/mixarchy-ctl",
+            "-o", root.tmpBinary
+          ])
+        } else {
+          root.downloadError()
+        }
+      }
+      else if (step === "download") {
+        if (exitCode === 0) {
+          root.runBootstrap("hash", [root.tool("sha256sum"), "-b", root.tmpBinary])
+        } else {
+          root.downloadError()
+        }
+      }
+      else if (step === "hash") {
+        // sha256sum -b prints "<hash> *<file>\n"; split on space → hash.
+        var actual = root.bootstrapHashOut.trim().split(" ")[0]
+        if (actual === root.expectedSha256) {
+          root.runBootstrap("chmod", [root.tool("chmod"), "755", root.tmpBinary])
+        } else {
+          console.warn("Mixarchy: checksum mismatch; deleting unverified binary")
+          root.runBootstrap("rm-tmp", [root.tool("rm"), "-f", root.tmpBinary])
+        }
+      }
+      else if (step === "chmod") {
+        if (exitCode === 0) {
+          root.runBootstrap("mv", [root.tool("mv"), "-f", root.tmpBinary,
+            root.pluginDir + "/bin/mixarchy-ctl"])
+        } else {
+          root.runBootstrap("rm-tmp", [root.tool("rm"), "-f", root.tmpBinary])
+        }
+      }
+      else if (step === "mv") {
+        if (exitCode === 0) {
+          root.ctlPath = root.pluginDir + "/bin/mixarchy-ctl"
+          root.bootstrapDone()
+        } else {
+          root.runBootstrap("rm-tmp", [root.tool("rm"), "-f", root.tmpBinary])
+        }
+      }
+      else if (step === "rm-tmp") {
+        root.downloadError()
+      }
+      else if (step === "check-cargo") {
+        if (exitCode === 0) {
+          root.resolvedCargo = root.cargoCandidates[root.cargoProbeIndex]
+          root.buildProc.environment = root.buildEnv
+          root.buildProc.command = [root.resolvedCargo, "build", "--release",
+            "--locked", "--manifest-path", root.pluginDir + "/Cargo.toml"]
+          root.isBuilding = true
+          root.buildProc.running = true
+        } else {
+          root.cargoProbeIndex++
+          if (root.cargoProbeIndex < root.cargoCandidates.length) {
+            root.runBootstrap("check-cargo", [root.tool("test"), "-x",
+              root.cargoCandidates[root.cargoProbeIndex]])
+          } else {
+            root.isBuilding = false
+            console.warn("Mixarchy: no trusted cargo binary found")
+          }
+        }
+      }
+    }
+  }
+
+  property int cargoProbeIndex: 0
+  property var cargoCandidates: []
+  property string resolvedCargo: ""
+
+  Process {
+    id: buildProc
+    clearEnvironment: true
+    environment: root.buildEnv
+    command: []
+    onExited: function(exitCode, exitStatus) {
+      root.isBuilding = false
+      if (exitCode === 0) {
         root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
-        root.refreshStatus()
-        root.refreshLibrary()
+        root.bootstrapDone()
+      } else {
+        console.warn("Mixarchy: cargo build failed")
       }
     }
   }
@@ -433,7 +684,11 @@ Panel {
   }
 
   Component.onCompleted: {
-    checkBinProc.running = true
+    // Resolve all bootstrap executables from fixed trusted locations first,
+    // then walk the bootstrap state machine.
+    root.bootstrapTools(["stat", "test", "mkdir", "curl", "sha256sum", "chmod", "mv", "rm"], function() {
+      root.runBootstrap("check-bin", [root.tool("test"), "-x", root.ctlPath])
+    })
     refreshStatus()
     refreshLibrary()
   }

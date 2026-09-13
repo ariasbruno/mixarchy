@@ -2,6 +2,7 @@ mod cover;
 mod engine;
 mod library;
 mod models;
+mod trusted;
 
 use std::path::PathBuf;
 
