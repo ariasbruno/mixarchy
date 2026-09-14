@@ -13,7 +13,7 @@ TARGET_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 
 RELEASE_TAG="v1.1.1"
-EXPECTED_SHA256="820db0cb07237cf2a5699c5e4a12b3203c5ea1a171ff36372a0d9b6af9b79c93"
+EXPECTED_SHA256="20ac824a623bcb237480375259a5551c0278f3ccd58795dd178b48b271f3a46b"
 MAX_BYTES=10485760 # 10 MiB limit
 
 # Resolve an executable from fixed trusted locations only. Never consults the

@@ -422,7 +422,7 @@ Panel {
   // is replaced by an explicit sha256sum → chmod → mv chain; each step is
   // its own process with argv only (no string interpolation).
   readonly property string releaseTag: "v1.1.1"
-  readonly property string expectedSha256: "820db0cb07237cf2a5699c5e4a12b3203c5ea1a171ff36372a0d9b6af9b79c93"
+  readonly property string expectedSha256: "20ac824a623bcb237480375259a5551c0278f3ccd58795dd178b48b271f3a46b"
 
   property string tmpBinary: root.pluginDir + "/bin/mixarchy-ctl.tmp"
   property string bootstrapStep: ""
