@@ -35,14 +35,16 @@ fn is_root_owned_readonly_file(meta: &fs::Metadata) -> bool {
     meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0
 }
 
-/// True when every directory from `path` up to `/` is a directory owned by
+/// True when every directory from `path`'s parent up to `/` is a directory owned by
 /// root and not writable by group or other.
 fn dir_chain_trusted(path: &Path) -> bool {
     let canonical = match fs::canonicalize(path) {
         Ok(c) => c,
         Err(_) => return false,
     };
-    let mut current = canonical.as_path();
+    let Some(mut current) = canonical.parent() else {
+        return false;
+    };
     loop {
         let Ok(meta) = fs::metadata(current) else {
             return false;
@@ -99,4 +101,34 @@ pub fn trusted_command(name: &str) -> Option<Command> {
     let mut cmd = Command::new(path);
     fixed_env(&mut cmd);
     Some(cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dir_chain_trusted_root_dir() {
+        assert!(dir_chain_trusted(Path::new("/usr/bin/ls")));
+    }
+
+    #[test]
+    fn test_resolve_trusted_system_binary() {
+        // mpv or ls should resolve on a standard Linux system
+        let resolved = resolve_trusted("ls");
+        assert!(resolved.is_some());
+        let p = resolved.unwrap();
+        assert!(p.starts_with("/usr/bin") || p.starts_with("/bin"));
+    }
+
+    #[test]
+    fn test_resolve_trusted_mpv() {
+        let mpv = resolve_trusted("mpv");
+        assert!(mpv.is_some(), "mpv should be resolved from trusted system locations");
+    }
+
+    #[test]
+    fn test_resolve_trusted_nonexistent() {
+        assert!(resolve_trusted("definitely_nonexistent_binary_xyz_123").is_none());
+    }
 }

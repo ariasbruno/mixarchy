@@ -421,7 +421,7 @@ Panel {
   // inherited PATH), and never starts a shell. The bash-based verify step
   // is replaced by an explicit sha256sum → chmod → mv chain; each step is
   // its own process with argv only (no string interpolation).
-  readonly property string releaseTag: "v1.1.0"
+  readonly property string releaseTag: "v1.1.1"
   readonly property string expectedSha256: "820db0cb07237cf2a5699c5e4a12b3203c5ea1a171ff36372a0d9b6af9b79c93"
 
   property string tmpBinary: root.pluginDir + "/bin/mixarchy-ctl.tmp"
@@ -466,7 +466,8 @@ Panel {
       var step = bootstrapProc.step
 
       if (step === "check-bin") {
-        if (exitCode === 0) {
+        var actual = (root.bootstrapHashOut || "").trim().split(" ")[0]
+        if (exitCode === 0 && actual === root.expectedSha256) {
           root.bootstrapDone()
           return
         }
@@ -479,7 +480,10 @@ Panel {
           root.bootstrapDone()
           return
         }
-        // Prefer verified release download (fast, no toolchain) over cargo build.
+        // Stale or unpinned binary: remove before re-acquiring verified release
+        root.runBootstrap("rm-bin", [root.tool("rm"), "-f", root.ctlPath])
+      }
+      else if (step === "rm-bin") {
         root.runBootstrap("mkdir", [root.tool("mkdir"), "-p", root.pluginDir + "/bin"])
       }
       else if (step === "mkdir") {
@@ -687,7 +691,7 @@ Panel {
     // Resolve all bootstrap executables from fixed trusted locations first,
     // then walk the bootstrap state machine.
     root.bootstrapTools(["stat", "test", "mkdir", "curl", "sha256sum", "chmod", "mv", "rm"], function() {
-      root.runBootstrap("check-bin", [root.tool("test"), "-x", root.ctlPath])
+      root.runBootstrap("check-bin", [root.tool("sha256sum"), "-b", root.ctlPath])
     })
     refreshStatus()
     refreshLibrary()

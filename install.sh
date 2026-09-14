@@ -12,7 +12,7 @@ PLUGIN_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 
-RELEASE_TAG="v1.1.0"
+RELEASE_TAG="v1.1.1"
 EXPECTED_SHA256="820db0cb07237cf2a5699c5e4a12b3203c5ea1a171ff36372a0d9b6af9b79c93"
 MAX_BYTES=10485760 # 10 MiB limit
 
@@ -81,13 +81,25 @@ else
 fi
 
 # Verify backend binary
-if [ -x "$PLUGIN_SRC/bin/mixarchy-ctl" ]; then
-  echo "  ✓ mixarchy-ctl binary ready ($PLUGIN_SRC/bin/mixarchy-ctl)"
+BIN_VERIFIED=0
+if [ -x "$PLUGIN_SRC/bin/mixarchy-ctl" ] && [ -n "$SHA256SUM_BIN" ]; then
+  SHA256_CURRENT="$("$SHA256SUM_BIN" "$PLUGIN_SRC/bin/mixarchy-ctl" 2>/dev/null || true)"
+  if [ "${SHA256_CURRENT%% *}" = "$EXPECTED_SHA256" ]; then
+    echo "  ✓ mixarchy-ctl binary verified ($RELEASE_TAG, sha256 match)"
+    BIN_VERIFIED=1
+  else
+    echo "  ! Stale or unpinned binary detected in bin/ — re-acquiring verified binary"
+  fi
+fi
+
+if [ "$BIN_VERIFIED" -eq 1 ]; then
+  : # Pinned binary already in place and verified
 elif [ -x "$PLUGIN_SRC/target/release/mixarchy-ctl" ]; then
-  echo "  ✓ mixarchy-ctl binary ready ($PLUGIN_SRC/target/release/mixarchy-ctl)"
+  echo "  ✓ mixarchy-ctl local build detected ($PLUGIN_SRC/target/release/mixarchy-ctl)"
   "$MKDIR_BIN" -p "$PLUGIN_SRC/bin"
   "$CP_BIN" "$PLUGIN_SRC/target/release/mixarchy-ctl" "$PLUGIN_SRC/bin/mixarchy-ctl"
-  echo "  ✓ Staged release binary into bin/"
+  echo "  ✓ Staged local release binary into bin/"
+else
   DOWNLOAD_OK=0
   if [ -n "$CURL_BIN" ] && [ -n "$SHA256SUM_BIN" ]; then
     echo "  -> Downloading precompiled mixarchy-ctl binary ($RELEASE_TAG)..."
@@ -143,12 +155,18 @@ if [ -L "$TARGET_DIR" ]; then
   "$RM_BIN" -f "$TARGET_DIR"
 fi
 "$MKDIR_BIN" -p "$TARGET_DIR"
-"$CP_BIN" -f "$PLUGIN_SRC/manifest.json" "$TARGET_DIR/"
-"$CP_BIN" -f "$PLUGIN_SRC/Panel.qml" "$TARGET_DIR/"
-"$MKDIR_BIN" -p "$TARGET_DIR/bin"
-"$CP_BIN" -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$TARGET_DIR/bin/"
-"$CP_BIN" -f "$PLUGIN_SRC/README.md" "$PLUGIN_SRC/LICENSE" "$TARGET_DIR/" 2>/dev/null || true
-"$CHMOD_BIN" +x "$TARGET_DIR/bin/mixarchy-ctl"
+if [ "$PLUGIN_SRC" = "$TARGET_DIR" ]; then
+  # In-place (re)install: skip self-copy to avoid `cp: same file`; the
+  # upgrade-integrity block above already re-acquired the pinned binary.
+  echo "  → In-place install (PLUGIN_SRC == TARGET_DIR), skipping self-copy"
+else
+  "$CP_BIN" -f "$PLUGIN_SRC/manifest.json" "$TARGET_DIR/"
+  "$CP_BIN" -f "$PLUGIN_SRC/Panel.qml" "$TARGET_DIR/"
+  "$MKDIR_BIN" -p "$TARGET_DIR/bin"
+  "$CP_BIN" -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$TARGET_DIR/bin/"
+  "$CP_BIN" -f "$PLUGIN_SRC/README.md" "$PLUGIN_SRC/LICENSE" "$TARGET_DIR/" 2>/dev/null || true
+  "$CHMOD_BIN" +x "$TARGET_DIR/bin/mixarchy-ctl"
+fi
 echo "  ✓ Installed plugin: $TARGET_DIR"
 
 # 3. Register widget in shell.json idempotently
