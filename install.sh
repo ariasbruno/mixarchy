@@ -23,7 +23,6 @@ set -euo pipefail
 # every tool is invoked by absolute path from fixed root-owned locations and no
 # inherited startup file, exported function, or shadowed executable can run.
 if [ -z "${OMARCHY_INSTALLER_SAFE_REEXEC:-}" ]; then
-  OMARCHY_INSTALLER_SAFE_REEXEC=1
   if [ -x /bin/bash ]; then
     SAFE_BASH=/bin/bash
   else
@@ -47,8 +46,8 @@ RELEASE_TAG="v1.1.1"
 EXPECTED_SHA256="20ac824a623bcb237480375259a5551c0278f3ccd58795dd178b48b271f3a46b"
 MAX_BYTES=10485760 # 10 MiB limit
 
-# Resolve an executable from fixed trusted locations only. Never consults the
-# inherited PATH.
+# Resolve an executable from fixed trusted system locations only. Never
+# consults the inherited PATH or user-writable directories.
 resolve_tool() {
   local name="$1" cand
   for cand in "/usr/bin/$name" "/bin/$name" "/usr/local/bin/$name"; do
@@ -60,29 +59,38 @@ resolve_tool() {
   return 1
 }
 
-# Resolve a required tool from trusted locations or abort the install.
-# There is deliberately NO fixed-path fallback here: falling back to a tool that
-# could not be validated would bypass the fail-closed hardening above.
+# Resolve a required tool from trusted locations or fail. Prints the resolved
+# path on success; on failure prints a diagnostic and returns non-zero. The
+# caller MUST abort with `|| exit 1` so the fail-closed behavior never
+# depends on `set -e` disposition for command substitutions, which is not
+# portable across bash versions.
 resolve_required() {
   local name="$1" resolved=""
   if ! resolved="$(resolve_tool "$name")"; then
     echo "  !! Error: required tool '$name' not found in trusted locations" >&2
     echo "     (/usr/bin, /bin, /usr/local/bin). Aborting to keep the install fail-closed." >&2
-    exit 1
+    return 1
   fi
   printf '%s\n' "$resolved"
 }
 
-TEST_BIN="$(resolve_required test)"
-MKDIR_BIN="$(resolve_required mkdir)"
-CP_BIN="$(resolve_required cp)"
-RM_BIN="$(resolve_required rm)"
-MV_BIN="$(resolve_required mv)"
-CHMOD_BIN="$(resolve_required chmod)"
+# The `|| exit 1` is deliberate: a failing command substitution inside an
+# assignment does not reliably trigger `set -e` across bash versions, so the
+# abort must be explicit. There is NO fixed-path fallback here: falling back to
+# a tool that could not be validated would bypass the fail-closed hardening.
+TEST_BIN="$(resolve_required test)" || exit 1
+MKDIR_BIN="$(resolve_required mkdir)" || exit 1
+CP_BIN="$(resolve_required cp)" || exit 1
+RM_BIN="$(resolve_required rm)" || exit 1
+MV_BIN="$(resolve_required mv)" || exit 1
+CHMOD_BIN="$(resolve_required chmod)" || exit 1
 CURL_BIN="$(resolve_tool curl || true)"
 SHA256SUM_BIN="$(resolve_tool sha256sum || true)"
 MPV_BIN="$(resolve_tool mpv || true)"
 CARGO_BIN="$(resolve_tool cargo || true)"
+if [ -z "$CARGO_BIN" ] && [ -f "$HOME/.cargo/bin/cargo" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+  CARGO_BIN="$HOME/.cargo/bin/cargo"
+fi
 JQ_BIN="$(resolve_tool jq || true)"
 OMARCHY_BIN="$(resolve_tool omarchy || true)"
 
@@ -94,9 +102,13 @@ uninstall() {
   fi
 
   if [ -f "$SHELL_JSON" ] && [ -n "$JQ_BIN" ]; then
-    if "$JQ_BIN" -e '.bar.layout.right[] | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
-      "$JQ_BIN" '.bar.layout.right |= map(select(.id != "'"$PLUGIN_ID"'"))' "$SHELL_JSON" > "$SHELL_JSON.tmp"
-      "$MV_BIN" "$SHELL_JSON.tmp" "$SHELL_JSON"
+    if "$JQ_BIN" -e '(.bar.layout.left[]?, .bar.layout.center[]?, .bar.layout.right[]?) | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
+      "$JQ_BIN" '
+        .bar.layout.left |= map(select(.id != "'"$PLUGIN_ID"'")) |
+        .bar.layout.center |= map(select(.id != "'"$PLUGIN_ID"'")) |
+        .bar.layout.right |= map(select(.id != "'"$PLUGIN_ID"'"))
+      ' "$SHELL_JSON" > "$SHELL_JSON.tmp.$$"
+      "$MV_BIN" -f "$SHELL_JSON.tmp.$$" "$SHELL_JSON"
       echo "  - Removed $PLUGIN_ID from $SHELL_JSON"
     fi
   fi
@@ -148,9 +160,9 @@ else
   if [ -n "$CURL_BIN" ] && [ -n "$SHA256SUM_BIN" ]; then
     echo "  -> Downloading precompiled mixarchy-ctl binary ($RELEASE_TAG)..."
     TMP_BIN="$PLUGIN_SRC/bin/mixarchy-ctl.tmp.$$"
+    "$RM_BIN" -f "$TMP_BIN"
 
     "$MKDIR_BIN" -p "$PLUGIN_SRC/bin"
-    "$RM_BIN" -f "$TMP_BIN"
 
     if "$CURL_BIN" -fsSL \
          --connect-timeout 10 \
@@ -215,7 +227,7 @@ echo "  ✓ Installed plugin: $TARGET_DIR"
 
 # 3. Register widget in shell.json idempotently
 if [ -f "$SHELL_JSON" ] && [ -n "$JQ_BIN" ]; then
-  if ! "$JQ_BIN" -e '.bar.layout.right[] | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
+  if ! "$JQ_BIN" -e '(.bar.layout.left[]?, .bar.layout.center[]?, .bar.layout.right[]?) | select(.id == "'"$PLUGIN_ID"'")' "$SHELL_JSON" >/dev/null 2>&1; then
     echo "  -> Registering $PLUGIN_ID in $SHELL_JSON..."
     "$JQ_BIN" '
       if (.bar.layout.right | map(.id) | contains(["omarchy.audio"])) then
@@ -223,8 +235,8 @@ if [ -f "$SHELL_JSON" ] && [ -n "$JQ_BIN" ]; then
       else
         .bar.layout.right += [{"id": "'"$PLUGIN_ID"'"}]
       end
-    ' "$SHELL_JSON" > "$SHELL_JSON.tmp"
-    "$MV_BIN" "$SHELL_JSON.tmp" "$SHELL_JSON"
+    ' "$SHELL_JSON" > "$SHELL_JSON.tmp.$$"
+    "$MV_BIN" -f "$SHELL_JSON.tmp.$$" "$SHELL_JSON"
     echo "  ✓ Added $PLUGIN_ID to bar layout (right section)"
   else
     echo "  ✓ Already registered in $SHELL_JSON"
