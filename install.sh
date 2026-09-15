@@ -1,11 +1,42 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # install.sh — Automated, idempotent installer for Mixarchy (Omarchy plugin).
 #
-# Hardening: required executables are resolved from fixed root-owned system
-# locations (never the inherited PATH), the download is pinned to an immutable
-# release tag and verified against a pinned SHA-256 before install, and the
-# temporary payload is only chmod'ed + moved atomically after verification.
+# Hardening:
+#  * The interpreter is a fixed trusted path (/bin/bash, never `env` or PATH
+#    resolution) invoked in privileged mode (-p), so Bash processes no
+#    inherited BASH_ENV/ENV startup file and imports no exported functions
+#    — from the very first process, before any script code runs.
+#  * The script then re-executes itself through a sanitized environment
+#    (`env -i`) with an explicit allow-list, so inherited PATH, LD_PRELOAD,
+#    and other hostile variables are cleared and rebuilt before tools run.
+#  * Required executables are resolved from fixed root-owned system locations
+#    (never the inherited PATH) and a required tool that cannot be validated
+#    aborts the install — there is no unchecked fallback.
+#  * The download is pinned to an immutable release tag and verified against a
+#    pinned SHA-256 before install, and the temporary payload is only chmod'ed
+#    + moved atomically after verification.
 set -euo pipefail
+
+# --- Sanitized self re-exec bootstrap ---------------------------------------
+# Re-run this script through a trusted fixed Bash with a cleared, reconstructed
+# environment (HOME, XDG_RUNTIME_DIR, LANG, fixed PATH only). From this point on
+# every tool is invoked by absolute path from fixed root-owned locations and no
+# inherited startup file, exported function, or shadowed executable can run.
+if [ -z "${OMARCHY_INSTALLER_SAFE_REEXEC:-}" ]; then
+  OMARCHY_INSTALLER_SAFE_REEXEC=1
+  if [ -x /bin/bash ]; then
+    SAFE_BASH=/bin/bash
+  else
+    SAFE_BASH=/usr/bin/bash
+  fi
+  exec /usr/bin/env -i \
+    OMARCHY_INSTALLER_SAFE_REEXEC=1 \
+    HOME="$HOME" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    LANG="${LANG:-C.UTF-8}" \
+    PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    "$SAFE_BASH" -p "$0" "$@"
+fi
 
 PLUGIN_ID="ariasbruno.mixarchy"
 PLUGIN_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,12 +60,25 @@ resolve_tool() {
   return 1
 }
 
-TEST_BIN="$(resolve_tool test || echo /usr/bin/test)"
-MKDIR_BIN="$(resolve_tool mkdir || echo /usr/bin/mkdir)"
-CP_BIN="$(resolve_tool cp || echo /usr/bin/cp)"
-RM_BIN="$(resolve_tool rm || echo /usr/bin/rm)"
-MV_BIN="$(resolve_tool mv || echo /usr/bin/mv)"
-CHMOD_BIN="$(resolve_tool chmod || echo /usr/bin/chmod)"
+# Resolve a required tool from trusted locations or abort the install.
+# There is deliberately NO fixed-path fallback here: falling back to a tool that
+# could not be validated would bypass the fail-closed hardening above.
+resolve_required() {
+  local name="$1" resolved=""
+  if ! resolved="$(resolve_tool "$name")"; then
+    echo "  !! Error: required tool '$name' not found in trusted locations" >&2
+    echo "     (/usr/bin, /bin, /usr/local/bin). Aborting to keep the install fail-closed." >&2
+    exit 1
+  fi
+  printf '%s\n' "$resolved"
+}
+
+TEST_BIN="$(resolve_required test)"
+MKDIR_BIN="$(resolve_required mkdir)"
+CP_BIN="$(resolve_required cp)"
+RM_BIN="$(resolve_required rm)"
+MV_BIN="$(resolve_required mv)"
+CHMOD_BIN="$(resolve_required chmod)"
 CURL_BIN="$(resolve_tool curl || true)"
 SHA256SUM_BIN="$(resolve_tool sha256sum || true)"
 MPV_BIN="$(resolve_tool mpv || true)"
