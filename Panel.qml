@@ -16,6 +16,20 @@ Panel {
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
   property string ctlPath: pluginDir + "/bin/mixarchy-ctl"
   property bool isBuilding: false
+  // True only after bootstrapDone(): a binary verified against the pinned
+  // SHA-256 has been assigned to ctlPath. Every automatic process boundary
+  // (status/lib/action/cover) refuses to run before this flag is set, so no
+  // unverified bytes from bin/ or target/ are ever executed, even during the
+  // async bootstrap window.
+  property bool bootstrapped: false
+  // Explicit developer opt-in: with MIXARCHY_DEV_BUILD=1 the bootstrap may
+  // use a locally built target/release binary WITHOUT matching the pinned
+  // release digest, but only with a permanent visible warning (devMode).
+  // Without this flag the cargo fallback is never started (fail closed).
+  readonly property bool devBuildEnabled: Quickshell.env("MIXARCHY_DEV_BUILD") === "1"
+  property bool devMode: false
+  // User-visible bootstrap error (no silent failures).
+  property string bootError: ""
 
   // ------------------------------------------------------------- Trusted processes
   // Every automatic process boundary clears the inherited environment and
@@ -60,7 +74,8 @@ Panel {
     "sha256sum": ["/usr/bin/sha256sum", "/bin/sha256sum"],
     "chmod": ["/usr/bin/chmod", "/bin/chmod"],
     "mv": ["/usr/bin/mv", "/bin/mv"],
-    "rm": ["/usr/bin/rm", "/bin/rm"]
+    "rm": ["/usr/bin/rm", "/bin/rm"],
+    "mktemp": ["/usr/bin/mktemp", "/bin/mktemp"]
   }
   property var resolvedTools: ({})
   property var pendingTool: null
@@ -419,12 +434,18 @@ Panel {
   // Every automatic boundary clears the inherited environment and uses only
   // executables resolved from fixed root-owned system locations (never the
   // inherited PATH), and never starts a shell. The bash-based verify step
-  // is replaced by an explicit sha256sum → chmod → mv chain; each step is
-  // its own process with argv only (no string interpolation).
+  // is replaced by an explicit mktemp → curl → sha256sum → chmod → mv chain;
+  // each step is its own process with argv only (no string interpolation).
+  // Every binary that may execute (release download, pre-existing local
+  // build, cargo output) must match the pinned digest before assignment.
   readonly property string releaseTag: "v1.1.1"
   readonly property string expectedSha256: "20ac824a623bcb237480375259a5551c0278f3ccd58795dd178b48b271f3a46b"
 
-  property string tmpBinary: root.pluginDir + "/bin/mixarchy-ctl.tmp"
+  // Unpredictable temp path created exclusively by the trusted mktemp
+  // process inside bin/ before any download writes to it. Never use a fixed
+  // name: a pre-existing symlink there would let curl overwrite an arbitrary
+  // user-writable file before verification.
+  property string tmpBinary: ""
   property string bootstrapStep: ""
   property string bootstrapHashOut: ""
 
@@ -436,19 +457,32 @@ Panel {
 
   function bootstrapDone() {
     root.isBuilding = false
+    // Only a digest-verified binary (or an explicitly opted-in dev build)
+    // may be executed; this flag is the single unlock for every automatic
+    // Process boundary.
+    root.bootstrapped = true
     root.refreshStatus()
     root.refreshLibrary()
   }
 
   function downloadError() {
     root.isBuilding = false
-    console.warn("Mixarchy: download/verify failed — falling back to cargo build")
+    // Without the explicit dev flag the cargo fallback is never started:
+    // a local build can never match the release pin, so attempting it would
+    // end in a silently dead widget. Fail closed with a visible error.
+    if (!root.devBuildEnabled) {
+      root.bootError = "Mixarchy: verified binary download failed and local builds are disabled. Set MIXARCHY_DEV_BUILD=1 to allow an unverified local build (developer mode)."
+      console.warn("Mixarchy: download/verify failed — dev builds disabled, refusing cargo fallback")
+      return
+    }
+    console.warn("Mixarchy: download/verify failed — dev build fallback (MIXARCHY_DEV_BUILD=1)")
     var cands = root.candidatesFor("cargo")
     root.cargoCandidates = cands
     root.cargoProbeIndex = 0
     if (cands.length > 0) {
       root.runBootstrap("check-cargo", [root.tool("test"), "-x", cands[0]])
     } else {
+      root.bootError = "Mixarchy: no trusted cargo binary found; cannot build locally."
       console.warn("Mixarchy: no trusted cargo binary found; cannot build locally")
     }
   }
@@ -471,16 +505,30 @@ Panel {
           root.bootstrapDone()
           return
         }
-        root.runBootstrap("check-target", [root.tool("test"), "-x",
+        root.runBootstrap("check-target-hash", [root.tool("sha256sum"), "-b",
           root.pluginDir + "/target/release/mixarchy-ctl"])
       }
-      else if (step === "check-target") {
-        if (exitCode === 0) {
+      else if (step === "check-target-hash") {
+        var targetHash = (root.bootstrapHashOut || "").trim().split(" ")[0]
+        if (exitCode === 0 && targetHash === root.expectedSha256) {
           root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
           root.bootstrapDone()
           return
         }
-        // Stale or unpinned binary: remove before re-acquiring verified release
+        if (exitCode === 0 && root.devBuildEnabled) {
+          // Developer mode opt-in: accept the local build without the release
+          // pin, but only with a permanent visible warning (devMode).
+          root.devMode = true
+          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
+          root.bootstrapDone()
+          return
+        }
+        // Stale, replaced, or unpinned local build: remove it and re-acquire
+        // the verified release (fail closed on mismatch).
+        root.runBootstrap("rm-target", [root.tool("rm"), "-f",
+          root.pluginDir + "/target/release/mixarchy-ctl"])
+      }
+      else if (step === "rm-target") {
         root.runBootstrap("rm-bin", [root.tool("rm"), "-f", root.ctlPath])
       }
       else if (step === "rm-bin") {
@@ -488,6 +536,18 @@ Panel {
       }
       else if (step === "mkdir") {
         if (exitCode === 0) {
+          // Exclusive unpredictable temp path inside bin/: mktemp creates it
+          // with O_EXCL, so a pre-existing symlink at that name is impossible.
+          root.runBootstrap("mktemp", [root.tool("mktemp"),
+            root.pluginDir + "/bin/mixarchy-ctl.XXXXXX"])
+        } else {
+          root.downloadError()
+        }
+      }
+      else if (step === "mktemp") {
+        var tmpPath = (root.bootstrapHashOut || "").trim()
+        if (exitCode === 0 && tmpPath !== "") {
+          root.tmpBinary = tmpPath
           root.runBootstrap("download", [
             root.tool("curl"), "-fsSL",
             "--connect-timeout", "10",
@@ -497,6 +557,7 @@ Panel {
             "-o", root.tmpBinary
           ])
         } else {
+          // mktemp failed: do not fall into a predictable-path download
           root.downloadError()
         }
       }
@@ -551,9 +612,27 @@ Panel {
               root.cargoCandidates[root.cargoProbeIndex]])
           } else {
             root.isBuilding = false
+            root.bootError = "Mixarchy: no trusted cargo binary found; cannot build locally."
             console.warn("Mixarchy: no trusted cargo binary found")
           }
         }
+      }
+      else if (step === "hash-built") {
+        var builtHash = (root.bootstrapHashOut || "").trim().split(" ")[0]
+        if (exitCode === 0 && builtHash === root.expectedSha256) {
+          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
+          root.bootstrapDone()
+        } else {
+          // Fail closed: built bytes are not the reviewed binary; remove and
+          // refuse to execute. ctlPath stays unset until a verified binary
+          // becomes available.
+          console.warn("Mixarchy: cargo build digest mismatch; refusing to execute unverified binary")
+          root.runBootstrap("rm-built", [root.tool("rm"), "-f",
+            root.pluginDir + "/target/release/mixarchy-ctl"])
+        }
+      }
+      else if (step === "rm-built") {
+        root.isBuilding = false
       }
     }
   }
@@ -570,15 +649,29 @@ Panel {
     onExited: function(exitCode, exitStatus) {
       root.isBuilding = false
       if (exitCode === 0) {
-        root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
-        root.bootstrapDone()
+        if (root.devBuildEnabled) {
+          // Developer mode opt-in: a local cargo build can never match the
+          // release pin (CI strip + toolchain), so skip the digest gate and
+          // accept it with a permanent visible warning instead.
+          root.devMode = true
+          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
+          root.bootstrapDone()
+        } else {
+          // Cargo output lives in user-writable target/: it must match the
+          // pinned digest before runCtl may ever execute it (fail closed).
+          root.runBootstrap("hash-built", [root.tool("sha256sum"), "-b",
+            root.pluginDir + "/target/release/mixarchy-ctl"])
+        }
       } else {
         console.warn("Mixarchy: cargo build failed")
+        root.bootError = "Mixarchy: local cargo build failed; plugin disabled until a verified binary is available."
       }
     }
   }
 
   function runCtl(args, onDone) {
+    // Never execute before the pinned binary is verified.
+    if (!root.bootstrapped) return
     if (actionProc.running) return
     var cmd = [root.ctlPath].concat(args)
     actionProc.nextAction = onDone || null
@@ -587,10 +680,14 @@ Panel {
   }
 
   function refreshStatus() {
+    // Never spawn the backend before the pinned binary is verified.
+    if (!root.bootstrapped) return
     if (!statusProc.running) statusProc.running = true
   }
 
   function refreshLibrary() {
+    // Never spawn the backend before the pinned binary is verified.
+    if (!root.bootstrapped) return
     root.libraryLoading = true
     if (!libProc.running) libProc.running = true
   }
@@ -602,6 +699,8 @@ Panel {
   // the full-res data URI.
   function requestCover(id, thumbOnly) {
     if (!id) return
+    // Never spawn the backend before the pinned binary is verified.
+    if (!root.bootstrapped) return
     if (thumbOnly && root.trackThumbs[id] !== undefined) return // row: already have it (or know it has none)
     if (root.coverRequested[id]) return // already pending or queued
     root.coverRequested[id] = true
@@ -689,12 +788,12 @@ Panel {
 
   Component.onCompleted: {
     // Resolve all bootstrap executables from fixed trusted locations first,
-    // then walk the bootstrap state machine.
-    root.bootstrapTools(["stat", "test", "mkdir", "curl", "sha256sum", "chmod", "mv", "rm"], function() {
+    // then walk the bootstrap state machine. Nothing touches ctlPath until a
+    // verified binary is assigned: bootstrapDone() sets root.bootstrapped and
+    // is the only entry point that starts status/library refresh.
+    root.bootstrapTools(["stat", "test", "mkdir", "mktemp", "curl", "sha256sum", "chmod", "mv", "rm"], function() {
       root.runBootstrap("check-bin", [root.tool("sha256sum"), "-b", root.ctlPath])
     })
-    refreshStatus()
-    refreshLibrary()
   }
 
   onOpenedChanged: {
@@ -837,6 +936,37 @@ Panel {
         id: mainColumn
         anchors.fill: parent
         spacing: Style.space(8)
+
+        // ========================================== [STATUS BANNER]
+        // Visible only when the plugin is running with an unverified local
+        // binary (developer mode) or a bootstrap failure; never silent.
+        Rectangle {
+          id: statusBanner
+          Layout.fillWidth: true
+          Layout.preferredHeight: statusBannerText.implicitHeight + Style.space(8)
+          visible: root.devMode || root.bootError !== ""
+          radius: Style.cornerRadius
+          color: root.bootError !== ""
+            ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.18)
+            : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+
+          Text {
+            id: statusBannerText
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            anchors.topMargin: Style.space(4)
+            anchors.bottomMargin: Style.space(4)
+            verticalAlignment: Text.AlignVCenter
+            wrapMode: Text.WordWrap
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            color: root.bootError !== "" ? Color.urgent : Color.foreground
+            text: root.bootError !== ""
+              ? root.bootError
+              : "Mixarchy: developer mode — using local build without the pinned release digest."
+          }
+        }
 
         // ========================================== [NAV TABS]
         RowLayout {
