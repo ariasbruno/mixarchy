@@ -54,7 +54,13 @@ pub fn extract_feat_from_title(title: &str) -> Option<String> {
         "(feat.", "(feat ", "[feat.", "[feat ", "(ft.", "(ft ", "[ft.", "[ft ",
     ] {
         if let Some(start) = lower.find(marker) {
-            let rest = &title[start + marker.len()..];
+            // `lower` may have a different byte length than `title`
+            // (`to_lowercase()` can expand a char, e.g. 'İ' -> "i\u{307}"),
+            // so `lower` indices are NOT valid on `title` — slicing `title`
+            // with them panics on a non-char-boundary or mis-slices. All
+            // markers and the delimited content are ASCII in practice, so
+            // slicing `lower` is always safe; the result may be lowercased.
+            let rest = &lower[start + marker.len()..];
             let close_char = if marker.starts_with('(') { ')' } else { ']' };
             if let Some(end) = rest.find(close_char) {
                 let feat_content = rest[..end].trim();
@@ -348,5 +354,39 @@ pub fn save_state(state: &PlayerState) {
     let path = state_file();
     if let Ok(json_str) = serde_json::to_string_pretty(state) {
         let _ = atomic_write(&path, &json_str);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_feat_handles_unicode_uppercase_titles() {
+        // 'İ' (U+0130) lowercases to "i̇" (i + combining dot), changing the
+        // byte length between `title` and `lower`; slicing `title` with
+        // `lower` indices used to panic or mis-slice. Must never panic and
+        // must return the (lowercased) featured artist.
+        assert_eq!(
+            extract_feat_from_title("İSTANBUL (feat. X)"),
+            Some("x".to_string())
+        );
+        assert_eq!(
+            extract_feat_from_title("CAFÉ (ft. Y)"),
+            Some("y".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_feat_plain_ascii_titles() {
+        assert_eq!(
+            extract_feat_from_title("Song Title (feat. Artist Name)"),
+            Some("artist name".to_string())
+        );
+        assert_eq!(
+            extract_feat_from_title("Song [ft. Guest]"),
+            Some("guest".to_string())
+        );
+        assert_eq!(extract_feat_from_title("No Collaboration"), None);
     }
 }
