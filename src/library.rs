@@ -229,7 +229,16 @@ pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
     // album -> track) rarely exceeds 4 levels; 8 leaves generous headroom.
     for entry in WalkDir::new(music_dir).max_depth(8)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(|e| match e {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                // Unreadable/unwalkable subtree (permissions, vanished
+                // mounts): skip it but stay diagnosable instead of silently
+                // shipping a partial library.
+                eprintln!("mixarchy: scan skipped: {err}");
+                None
+            }
+        })
     {
         let path = entry.path();
         if !path.is_file() {
@@ -273,7 +282,15 @@ pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
             if let Ok(file) = File::open(path) {
                 let reader = BufReader::new(file);
                 let mut resolved_paths = Vec::new();
-                for line in reader.lines().map_while(Result::ok) {
+                for line in reader.lines().map_while(|r| match r {
+                    Ok(line) => Some(line),
+                    Err(err) => {
+                        // A corrupt playlist (truncated write, weird encoding)
+                        // stops the list but the error must not be silent.
+                        eprintln!("mixarchy: {}: failed to read playlist: {err}", path.display());
+                        None
+                    }
+                }) {
                     let trimmed = line.trim();
                     if trimmed.is_empty() || trimmed.starts_with('#') {
                         continue;
