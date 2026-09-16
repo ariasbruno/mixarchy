@@ -576,7 +576,9 @@ Panel {
   // is replaced by an explicit mktemp → curl → sha256sum → chmod → mv chain;
   // each step is its own process with argv only (no string interpolation).
   // Every binary that may execute (release download, pre-existing local
-  // build, cargo output) must match the pinned digest before assignment.
+  // build) must match the pinned digest before assignment; freshly built
+  // cargo output is accepted only in opted-in developer mode, because a
+  // local build can never match the stripped CI release pin.
   readonly property string releaseTag: "v1.1.1"
   readonly property string expectedSha256: "20ac824a623bcb237480375259a5551c0278f3ccd58795dd178b48b271f3a46b"
 
@@ -776,23 +778,6 @@ Panel {
           }
         }
       }
-      else if (step === "hash-built") {
-        var builtHash = (root.bootstrapHashOut || "").trim().split(" ")[0]
-        if (exitCode === 0 && builtHash === root.expectedSha256) {
-          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
-          root.bootstrapDone()
-        } else {
-          // Fail closed: built bytes are not the reviewed binary; remove and
-          // refuse to execute. ctlPath stays unset until a verified binary
-          // becomes available.
-          console.warn("Mixarchy: cargo build digest mismatch; refusing to execute unverified binary")
-          root.runBootstrap("rm-built", [root.tool("rm"), "-f",
-            root.pluginDir + "/target/release/mixarchy-ctl"])
-        }
-      }
-      else if (step === "rm-built") {
-        root.isBuilding = false
-      }
     }
   }
 
@@ -817,10 +802,17 @@ Panel {
           root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
           root.bootstrapDone()
         } else {
-          // Cargo output lives in user-writable target/: it must match the
-          // pinned digest before runCtl may ever execute it (fail closed).
-          root.runBootstrap("hash-built", [root.tool("sha256sum"), "-b",
-            root.pluginDir + "/target/release/mixarchy-ctl"])
+          // Fail closed: a locally built binary can never match the CI
+          // release pin (different strip flags and toolchain), so the old
+          // hash-built step was dead code that always ended in a SILENT
+          // disabled widget. Refuse to execute and say so instead.
+          console.warn("Mixarchy: refusing to execute unverified local build (set MIXARCHY_DEV_BUILD=1 to opt in)")
+          root.bootError = "Mixarchy: local cargo build output is not digest-verified; plugin disabled. Set MIXARCHY_DEV_BUILD=1 to allow an unverified local build (developer mode)."
+          // The build drove the watchdog directly (restarted in check-cargo);
+          // stand it down now that the bootstrap has concluded, or its timer
+          // would later overwrite this error with a misleading "bootstrap
+          // timed out" banner.
+          root.bootstrapWatchdog.stop()
         }
       } else {
         console.warn("Mixarchy: cargo build failed")
