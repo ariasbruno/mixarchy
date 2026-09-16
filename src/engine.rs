@@ -113,6 +113,21 @@ pub fn send_mpv_cmd(command: serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
+/// Like send_mpv_cmd, but reports a failed send on stderr instead of
+/// silently swallowing it. Used where a dropped command would leave the
+/// player in a visible wrong state (play_track), so the operator can see
+/// what was attempted from the shell session output.
+fn send_mpv_cmd_logged(command: serde_json::Value) -> Option<serde_json::Value> {
+    let res = send_mpv_cmd(command.clone());
+    if res.is_none() {
+        eprintln!(
+            "mixarchy: mpv command failed: {}",
+            serde_json::to_string(&command).unwrap_or_default()
+        );
+    }
+    res
+}
+
 pub fn get_mpv_property(prop: &str) -> Option<serde_json::Value> {
     let res = send_mpv_cmd(serde_json::json!(["get_property", prop]))?;
     if res.get("error").and_then(|e| e.as_str()) == Some("success") {
@@ -194,7 +209,7 @@ pub fn play_track(
 
     let pos = start_pos.unwrap_or(0.0);
     if pos > 0.5 {
-        let _ = send_mpv_cmd(serde_json::json!([
+        send_mpv_cmd_logged(serde_json::json!([
             "loadfile",
             track_path,
             "replace",
@@ -202,9 +217,9 @@ pub fn play_track(
             format!("start={:.2}", pos)
         ]));
     } else {
-        let _ = send_mpv_cmd(serde_json::json!(["loadfile", track_path, "replace"]));
+        send_mpv_cmd_logged(serde_json::json!(["loadfile", track_path, "replace"]));
     }
-    let _ = send_mpv_cmd(serde_json::json!(["set_property", "pause", false]));
+    send_mpv_cmd_logged(serde_json::json!(["set_property", "pause", false]));
 
     let mut state = load_state();
     state.is_playing = true;
