@@ -355,6 +355,12 @@ Panel {
 
   Process {
     id: libProc
+    // True once onExited ran for the CURRENT run (cleared at run start).
+    // Quickshell's Process does NOT emit exited for QProcess::FailedToStart
+    // (upstream src/io/process.cpp: errorOccurred only warns + emits
+    // runningChanged), so ending with running==false and this flag clear
+    // means the backend never started.
+    property bool sawExited: false
     clearEnvironment: true
     environment: root.cleanEnv
     command: [root.ctlPath, "library"]
@@ -372,10 +378,31 @@ Panel {
       }
     }
     onExited: function(exitCode, exitStatus) {
+      libProc.sawExited = true
+      if (exitStatus !== 0) {
+        // Crashed/killed. onStreamFinished already ran before this handler
+        // (upstream onFinished calls streamEnded first), so the list shows
+        // the data the backend produced before dying — log, don't clobber.
+        console.warn("Mixarchy: library process ended abnormally (exitStatus " + exitStatus + ", code " + exitCode + ")")
+      }
       if (exitCode !== 0) {
         root.bootError = "Mixarchy: backend library process failed unexpectedly."
       } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
         root.bootError = ""
+      }
+    }
+    onRunningChanged: {
+      if (libProc.running) {
+        // A new run started: the previous run's onExited set sawExited, which
+        // must not leak into the new run's end decision.
+        libProc.sawExited = false
+      } else if (!libProc.sawExited) {
+        // FailedToStart: onExited/onStreamFinished never fire, so
+        // libraryLoading stays stuck true and the list keeps stale tracks
+        // with no error surfaced. Unstick the UI.
+        console.warn("Mixarchy: library process failed to start")
+        root.libraryLoading = false
+        root.bootError = "Mixarchy: backend library process failed unexpectedly."
       }
     }
   }
@@ -383,6 +410,10 @@ Panel {
   Process {
     id: actionProc
     property var nextAction: null
+    // Same sawExited invariant as libProc: tracks whether onExited ran for
+    // the current run so a FailedToStart (no exited, no streamEnded) can be
+    // distinguished from a clean/crashed end.
+    property bool sawExited: false
     clearEnvironment: true
     environment: root.cleanEnv
     stdout: StdioCollector {
@@ -397,10 +428,32 @@ Panel {
       }
     }
     onExited: function(exitCode, exitStatus) {
+      actionProc.sawExited = true
+      if (exitStatus !== 0) {
+        // Crashed/killed, rather than a clean exit. onStreamFinished already
+        // ran first (upstream streamEnded-before-exited order), refreshing
+        // status and dispatching nextAction — log for diagnosis, don't
+        // double-dispatch.
+        console.warn("Mixarchy: action process ended abnormally (exitStatus " + exitStatus + ", code " + exitCode + ")")
+      }
       if (exitCode !== 0) {
         root.bootError = "Mixarchy: backend action process failed unexpectedly."
       } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
         root.bootError = ""
+      }
+    }
+    onRunningChanged: {
+      if (actionProc.running) {
+        // A new run started: the previous run's onExited set sawExited, which
+        // must not leak into the new run's end decision.
+        actionProc.sawExited = false
+      } else if (!actionProc.sawExited) {
+        // FailedToStart: onExited/onStreamFinished never fire, so the action
+        // never ran and its continuation must not run either (a queued
+        // rescan's refreshLibrary callback, for example).
+        console.warn("Mixarchy: action process failed to start; dropping pending continuation")
+        actionProc.nextAction = null
+        root.bootError = "Mixarchy: backend action process failed unexpectedly."
       }
     }
   }
@@ -410,10 +463,34 @@ Panel {
   // in-flight process plus an explicit queue drained on finish, so a burst of
   // visible rows (ListView instantiates ~20 delegates) never drops requests or
   // misattributes a result to the wrong track id.
+  // Release every cover request a backend run left stuck: the pending one and
+  // the whole queued batch. Runs when the current cover run ended WITHOUT
+  // onStreamFinished (Quickshell's FailedToStart path — verified upstream:
+  // errorOccurred emits only runningChanged, never exited/streamEnded), so
+  // coverRequested dedup and the serial queue recover on the next
+  // scroll/current-track change instead of blocking retries forever.
+  function clearCoverState() {
+    var pendId = coverProc.pendingId
+    coverProc.pendingId = ""
+    coverProc.pendingThumbOnly = false
+    if (pendId !== "") root.coverRequested[pendId] = false
+    while (root.coverQueue.length > 0) {
+      var queued = root.coverQueue.shift()
+      root.coverRequested[queued.id] = false
+    }
+  }
+
   Process {
     id: coverProc
     property var pendingId: ""
     property bool pendingThumbOnly: false
+    // True once onExited ran for the CURRENT run. Cleared when a run starts
+    // (requestCover, queue advance, and onStarted via runningChanged(true)).
+    // Quickshell's Process does NOT emit exited for QProcess::FailedToStart
+    // (upstream src/io/process.cpp: errorOccurred only warns + emits
+    // runningChanged), so a run ending with running==false and this flag
+    // clear means the backend never started.
+    property bool sawExited: false
     clearEnvironment: true
     environment: root.cleanEnv
     stdout: StdioCollector {
@@ -454,15 +531,39 @@ Panel {
           coverProc.command = next.thumbOnly
             ? [root.ctlPath, "cover", "--thumb", next.id]
             : [root.ctlPath, "cover", next.id]
+          coverProc.sawExited = false
           coverProc.running = true
         }
       }
     }
     onExited: function(exitCode, exitStatus) {
+      coverProc.sawExited = true
+      if (exitStatus !== 0) {
+        // Crashed/killed. onStreamFinished already ran before this handler
+        // (upstream onFinished calls streamEnded first), so the per-request
+        // state is cleared and the queue has advanced — touching it here
+        // would corrupt the next in-flight request. Log instead, so a broken
+        // backend is diagnosable rather than a silent "no art" UI.
+        console.warn("Mixarchy: cover process ended abnormally (exitStatus " + exitStatus + ", code " + exitCode + ")")
+      }
       if (exitCode !== 0) {
         root.bootError = "Mixarchy: backend cover process failed unexpectedly."
       } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
         root.bootError = ""
+      }
+    }
+    onRunningChanged: {
+      if (coverProc.running) {
+        // A new run started: the previous run's onExited set sawExited, which
+        // must not leak into the new run's end decision.
+        coverProc.sawExited = false
+      } else if (!coverProc.sawExited) {
+        // FailedToStart: onExited/onStreamFinished never fire, so the pending
+        // request and everything queued stays stuck (dedup blocks retries and
+        // the queue only drains inside onStreamFinished). Release it all.
+        console.warn("Mixarchy: cover process failed to start; clearing stale cover state")
+        root.clearCoverState()
+        root.bootError = "Mixarchy: backend cover process failed unexpectedly."
       }
     }
   }
@@ -741,6 +842,7 @@ Panel {
     var cmd = [root.ctlPath].concat(args)
     actionProc.nextAction = onDone || null
     actionProc.command = cmd
+    actionProc.sawExited = false
     actionProc.running = true
   }
 
@@ -754,7 +856,10 @@ Panel {
     // Never spawn the backend before the pinned binary is verified.
     if (!root.bootstrapped) return
     root.libraryLoading = true
-    if (!libProc.running) libProc.running = true
+    if (!libProc.running) {
+      libProc.sawExited = false
+      libProc.running = true
+    }
   }
 
   // Request the cover for a single track id, deduplicated. Called on-demand
@@ -779,6 +884,7 @@ Panel {
     coverProc.command = entry.thumbOnly
       ? [root.ctlPath, "cover", "--thumb", entry.id]
       : [root.ctlPath, "cover", entry.id]
+    coverProc.sawExited = false
     coverProc.running = true
   }
 
