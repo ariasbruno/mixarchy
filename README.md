@@ -39,7 +39,7 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 
 ## Configuration & Supported Formats
 
-- **Default Music Directory**: `~/Music/` (recursively scanned; cached in `~/.cache/mixarchy/library.json`).
+- **Default Music Directory**: `~/Music/` (recursively scanned up to 8 directory levels deep; cached in `~/.cache/mixarchy/library.json`).
 - **Rescanning**: Click the refresh icon (`󰑐`) in the UI header or run `mixarchy-ctl scan` anytime to re-index your collection.
 - **Supported Formats**:
   - **Lossless**: FLAC (`.flac`), ALAC / AAC (`.m4a`), WAV (`.wav`)
@@ -117,7 +117,10 @@ cd mixarchy
 
 > [!NOTE]
 > `install.sh` requires `mpv` installed. It never runs privileged commands;
-> if `mpv` is missing it prints instructions and exits. The script copies
+> if `mpv` is missing it prints instructions and exits. The Cargo fallback
+> resolves `cargo` only from fixed root-owned system locations (`/usr/bin`,
+> `/bin`, `/usr/local/bin`) — never from `~/.cargo/bin` — so a
+> user-writable toolchain can never be silently executed. The script copies
 > files rather than symlinking, so the installed plugin is self-contained and
 > survives later changes to this clone.
 
@@ -159,6 +162,16 @@ To validate the plugin manifest locally:
 ```bash
 omarchy plugin validate ~/.config/omarchy/plugins/ariasbruno.mixarchy
 ```
+
+---
+
+## Security & Trust Notes
+
+- **Pinned-artifact distribution**: The precompiled `x86_64` release binary is immutable (tag `v1.1.1`, built by GitHub Actions) and every acquisition path — installer download, in-place binary, local build — is verified against its exact SHA-256 checksum before it is staged or executed.
+- **Fail-closed bootstrap**: The Quickshell widget runs no command before the pinned binary is verified; a failed download or digest mismatch disables the player with a visible error instead of falling back to unverified bytes. A local `cargo` build is accepted only behind the explicit `MIXARCHY_DEV_BUILD=1` opt-in (developer mode, permanently visible warning).
+- **Trusted tool resolution**: Both the widget's QML probe and `install.sh` resolve tools only from fixed root-owned system locations and validate the resolved file (regular file, root-owned, non-group/other-writable). The QML probe validates ownership of the tool file and its immediate parent directory; `install.sh` additionally validates every directory in the full chain. Neither ever consults the inherited `PATH` or `$HOME`.
+- **No privileged or shell execution**: Nothing in the install or runtime path runs with elevated privileges or through a shell; every process boundary is argv-only with a cleared environment.
+- **Bounded scans & queue size**: Library scans traverse at most 8 directory levels, bounding work on pathological trees. Play-queue requests travel as a single argv batch, so queues on the order of 100k tracks can exceed the kernel `ARG_MAX` limit and should be chunked.
 
 ---
 

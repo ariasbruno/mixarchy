@@ -289,7 +289,11 @@ Panel {
         return
       }
 
-      // statdir
+      // statdir — ownership of the DIRECT PARENT only. This QML probe checks
+      // the tool file and its immediate parent; it deliberately does not walk
+      // the full chain (install.sh's trusted helpers validate every directory
+      // on the path). The parent check still defeats the common attack: a
+      // binary dropped into a user-writable directory.
       if (exitCode !== 0 || !root.statLineOk(root.probeStatOut)) {
         root.probeNext()
         return

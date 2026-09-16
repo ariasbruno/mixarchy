@@ -54,6 +54,10 @@ fn main() {
             }
         }
         "play-queue" => {
+            // Tracks travel as a single argv batch (Quickshell spawns with
+            // argv only — no shell). Queues on the order of 100k paths can
+            // exceed the kernel ARG_MAX limit (~2 MiB of stack), so callers
+            // with huge libraries should chunk the request.
             let source = if args.len() > 2 { &args[2] } else { "Tracks" };
             let mut queue: Vec<String> = args.iter().skip(4).cloned().collect();
             if !queue.is_empty() {
