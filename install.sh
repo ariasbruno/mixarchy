@@ -406,6 +406,8 @@ if [ -f "$SHELL_JSON" ] && [ -n "$JQ_BIN" ]; then
   else
     echo "  ✓ Already registered in $SHELL_JSON"
   fi
+elif [ -f "$SHELL_JSON" ]; then
+  echo "  ! jq not found; the widget was NOT registered in $SHELL_JSON (re-run install.sh after installing jq)"
 fi
 
 # 4. Restart the Omarchy shell so the new widget loads. Use `restart`, NOT
