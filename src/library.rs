@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,23 @@ pub fn lib_cache_file() -> PathBuf {
 
 pub fn state_file() -> PathBuf {
     cache_dir().join("state.json")
+}
+
+// Write a file atomically: write to a unique temp file in the same directory,
+// fsync it, then rename over the destination (atomic on the same filesystem),
+// so a crash or concurrent reader never observes a truncated JSON file.
+fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
+    let tmp_name = format!(
+        "{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("out"),
+        std::process::id()
+    );
+    let tmp_path = path.with_file_name(tmp_name);
+    let mut file = File::create(&tmp_path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 pub fn default_music_dir() -> PathBuf {
@@ -282,7 +299,7 @@ pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
 
     let cache_path = lib_cache_file();
     let json_str = serde_json::to_string_pretty(&data)?;
-    fs::write(&cache_path, json_str)?;
+    atomic_write(&cache_path, &json_str)?;
 
     Ok(data)
 }
@@ -330,6 +347,6 @@ pub fn load_state() -> PlayerState {
 pub fn save_state(state: &PlayerState) {
     let path = state_file();
     if let Ok(json_str) = serde_json::to_string_pretty(state) {
-        let _ = fs::write(path, json_str);
+        let _ = atomic_write(&path, &json_str);
     }
 }

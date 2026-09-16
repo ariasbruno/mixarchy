@@ -194,7 +194,6 @@ resolve_required() {
 # assignment does not reliably trigger `set -e` across bash versions, so the
 # abort must be explicit. There is NO fixed-path fallback here: falling back to
 # a tool that could not be validated would bypass the fail-closed hardening.
-TEST_BIN="$(resolve_required test)" || exit 1
 MKDIR_BIN="$(resolve_required mkdir)" || exit 1
 CP_BIN="$(resolve_required cp)" || exit 1
 RM_BIN="$(resolve_required rm)" || exit 1
@@ -318,7 +317,11 @@ else
          --max-filesize "$MAX_BYTES" \
          "https://github.com/ariasbruno/mixarchy/releases/download/${RELEASE_TAG}/mixarchy-ctl" \
          -o "$TMP_BIN"; then
-      SHA256_OUT="$("$SHA256SUM_BIN" "$TMP_BIN")"
+      SHA256_OUT="$("$SHA256SUM_BIN" "$TMP_BIN")" || {
+        echo "  ! Error: sha256sum failed to verify the downloaded binary; aborting." >&2
+        "$RM_BIN" -f "$TMP_BIN"
+        exit 1
+      }
       ACTUAL_SHA256="${SHA256_OUT%% *}"
       if [ -n "$ACTUAL_SHA256" ] && [ "$EXPECTED_SHA256" = "$ACTUAL_SHA256" ]; then
         "$CHMOD_BIN" 755 "$TMP_BIN"

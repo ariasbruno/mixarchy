@@ -13,7 +13,17 @@ Panel {
   manageIpc: true
 
   readonly property string homeDir: Quickshell.env("HOME") || ""
-  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
+  // Percent-decode the resolved URL (a path with spaces arrives as file:///...%20...);
+  // fall back to the raw path on malformed input rather than crashing (fail-safe).
+  readonly property string pluginDir: (function() {
+    var dir = String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
+    try {
+      dir = decodeURIComponent(dir)
+    } catch (e) {
+      // Malformed percent-encoding: keep the raw path.
+    }
+    return dir.replace(/\/$/, "")
+  })()
   property string ctlPath: pluginDir + "/bin/mixarchy-ctl"
   property bool isBuilding: false
   // True only after bootstrapDone(): a binary verified against the pinned
@@ -331,7 +341,14 @@ Panel {
             root.lastSyncTimePos = root.timePos
             root.lastSyncWall = Date.now()
           }
-        } catch (e) {}
+        } catch (e) { console.warn("Mixarchy: status parse: " + e) }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) {
+        root.bootError = "Mixarchy: backend status process failed unexpectedly."
+      } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
+        root.bootError = ""
       }
     }
   }
@@ -351,7 +368,14 @@ Panel {
           root.playlists = res.playlists || []
           root.trackCount = res.track_count || root.tracks.length
           root.playlistCount = res.playlist_count || root.playlists.length
-        } catch (e) {}
+        } catch (e) { console.warn("Mixarchy: library parse: " + e) }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) {
+        root.bootError = "Mixarchy: backend library process failed unexpectedly."
+      } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
+        root.bootError = ""
       }
     }
   }
@@ -370,6 +394,13 @@ Panel {
           actionProc.nextAction = null
           act()
         }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) {
+        root.bootError = "Mixarchy: backend action process failed unexpectedly."
+      } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
+        root.bootError = ""
       }
     }
   }
@@ -415,7 +446,7 @@ Panel {
               root.nowPlayingCover = ""
             }
           }
-        } catch (e) {} // malformed response: leave trackThumbs unset -> retried on next scroll
+        } catch (e) { console.warn("Mixarchy: cover parse: " + e) } // malformed response: leave trackThumbs unset -> retried on next scroll
         if (root.coverQueue.length > 0) {
           var next = root.coverQueue.shift()
           coverProc.pendingId = next.id
@@ -425,6 +456,13 @@ Panel {
             : [root.ctlPath, "cover", next.id]
           coverProc.running = true
         }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) {
+        root.bootError = "Mixarchy: backend cover process failed unexpectedly."
+      } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
+        root.bootError = ""
       }
     }
   }
@@ -448,14 +486,20 @@ Panel {
   property string tmpBinary: ""
   property string bootstrapStep: ""
   property string bootstrapHashOut: ""
+  // Set by the bootstrap watchdog when it aborts a hung bootstrap; every
+  // onExited continuation of the aborted processes checks it and stands down
+  // instead of re-entering the state machine.
+  property bool bootstrapAborted: false
 
   function runBootstrap(step, args) {
+    bootstrapWatchdog.restart()
     bootstrapProc.step = step
     bootstrapProc.command = args
     bootstrapProc.running = true
   }
 
   function bootstrapDone() {
+    bootstrapWatchdog.stop()
     root.isBuilding = false
     // Only a digest-verified binary (or an explicitly opted-in dev build)
     // may be executed; this flag is the single unlock for every automatic
@@ -466,6 +510,7 @@ Panel {
   }
 
   function downloadError() {
+    bootstrapWatchdog.stop()
     root.isBuilding = false
     // Without the explicit dev flag the cargo fallback is never started:
     // a local build can never match the release pin, so attempting it would
@@ -497,6 +542,7 @@ Panel {
       onStreamFinished: root.bootstrapHashOut = text
     }
     onExited: function(exitCode, exitStatus) {
+      if (root.bootstrapAborted) return
       var step = bootstrapProc.step
 
       if (step === "check-bin") {
@@ -647,6 +693,7 @@ Panel {
     environment: root.buildEnv
     command: []
     onExited: function(exitCode, exitStatus) {
+      if (root.bootstrapAborted) return
       root.isBuilding = false
       if (exitCode === 0) {
         if (root.devBuildEnabled) {
@@ -784,6 +831,26 @@ Panel {
     repeat: true
     running: root.opened || root.isPlaying || root.isMpvRunning
     onTriggered: root.refreshStatus()
+  }
+
+  // Aborts a bootstrap that hangs: no single step may leave the widget stuck
+  // unverified indefinitely. Restarted on every runBootstrap step, stopped on
+  // success (bootstrapDone) and on downloadError. Only covers the bootstrap
+  // flow, never runCtl/refresh.
+  Timer {
+    id: bootstrapWatchdog
+    interval: 180000
+    repeat: false
+    running: false
+    onTriggered: {
+      if (!root.bootstrapped) {
+        root.bootstrapAborted = true
+        root.isBuilding = false
+        if (bootstrapProc.running) bootstrapProc.running = false
+        if (buildProc.running) buildProc.running = false
+        root.bootError = "Mixarchy: bootstrap timed out after 180s."
+      }
+    }
   }
 
   Component.onCompleted: {
@@ -938,13 +1005,14 @@ Panel {
         spacing: Style.space(8)
 
         // ========================================== [STATUS BANNER]
-        // Visible only when the plugin is running with an unverified local
-        // binary (developer mode) or a bootstrap failure; never silent.
+        // Visible while the backend is being downloaded/built, when the plugin
+        // runs with an unverified local binary (developer mode), or on a
+        // bootstrap/backend failure; never silent.
         Rectangle {
           id: statusBanner
           Layout.fillWidth: true
           Layout.preferredHeight: statusBannerText.implicitHeight + Style.space(8)
-          visible: root.devMode || root.bootError !== ""
+          visible: root.devMode || root.bootError !== "" || root.isBuilding
           radius: Style.cornerRadius
           color: root.bootError !== ""
             ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.18)
@@ -964,7 +1032,9 @@ Panel {
             color: root.bootError !== "" ? Color.urgent : Color.foreground
             text: root.bootError !== ""
               ? root.bootError
-              : "Mixarchy: developer mode — using local build without the pinned release digest."
+              : (root.isBuilding
+                ? "Mixarchy: downloading / building backend, please wait..."
+                : "Mixarchy: developer mode — using local build without the pinned release digest.")
           }
         }
 
