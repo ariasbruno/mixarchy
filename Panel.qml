@@ -650,6 +650,14 @@ Panel {
           root.buildProc.command = [root.resolvedCargo, "build", "--release",
             "--locked", "--manifest-path", root.pluginDir + "/Cargo.toml"]
           root.isBuilding = true
+          // check-cargo is a fast `test -x` probe, so the watchdog window
+          // restarted by runBootstrap mostly expires BEFORE the real build
+          // finishes: a cold `cargo build --release --locked` can legitimately
+          // take > 3 minutes and would be aborted as a false timeout. Give
+          // buildProc its own fresh watchdog window here (and stand it down
+          // in buildProc.onExited, so the bootstrap never needs to extend it
+          // again — no double restart).
+          root.bootstrapWatchdog.restart()
           root.buildProc.running = true
         } else {
           root.cargoProbeIndex++
@@ -660,6 +668,10 @@ Panel {
             root.isBuilding = false
             root.bootError = "Mixarchy: no trusted cargo binary found; cannot build locally."
             console.warn("Mixarchy: no trusted cargo binary found")
+            // The bootstrap has concluded with an error; stop the watchdog
+            // so its timer cannot later replace this message with a bogus
+            // "bootstrap timed out" banner.
+            root.bootstrapWatchdog.stop()
           }
         }
       }
@@ -712,6 +724,12 @@ Panel {
       } else {
         console.warn("Mixarchy: cargo build failed")
         root.bootError = "Mixarchy: local cargo build failed; plugin disabled until a verified binary is available."
+        // The build drove the watchdog directly (restarted in check-cargo);
+        // stand it down now that the bootstrap has concluded, or its timer
+        // would later overwrite this error with a misleading "bootstrap
+        // timed out" banner. On the success paths bootstrapDone() already
+        // stopped it (or runBootstrap keeps the hash step gated).
+        root.bootstrapWatchdog.stop()
       }
     }
   }
