@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +15,15 @@ use crate::models::{format_duration, LibraryData, PlaylistItem, PlayerState, Tra
 pub fn cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let path = PathBuf::from(home).join(".cache").join("mixarchy");
-    let _ = fs::create_dir_all(&path);
+    // library.json / state.json carry absolute track paths and the current
+    // playlist position; with the default umask (0755) any local user could
+    // read them. Create (and re-assert) 0700 so the cache is private:
+    // recursive creation applies the mode to every directory it creates, and
+    // set_permissions tightens a pre-existing directory that predates the
+    // policy. Failures stay silent — the path is still returned and the
+    // cache is best-effort, exactly as before.
+    let _ = fs::DirBuilder::new().mode(0o700).recursive(true).create(&path);
+    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
     path
 }
 
