@@ -202,11 +202,23 @@ CHMOD_BIN="$(resolve_required chmod)" || exit 1
 MKTEMP_BIN="$(resolve_required mktemp)" || exit 1
 DD_BIN="$(resolve_required dd)" || exit 1
 CURL_BIN="$(resolve_tool curl || true)"
+if [ -z "$CURL_BIN" ]; then
+  echo "  ! curl not found in trusted locations; downloading the release binary will be skipped"
+fi
 SHA256SUM_BIN="$(resolve_tool sha256sum || true)"
 MPV_BIN="$(resolve_tool mpv || true)"
 CARGO_BIN="$(resolve_tool cargo || true)" # no $HOME/.cargo/bin fallback: user-writable
+if [ -z "$CARGO_BIN" ]; then
+  echo "  ! cargo not found in trusted locations; the Cargo build fallback is disabled"
+fi
 JQ_BIN="$(resolve_tool jq || true)"
+if [ -z "$JQ_BIN" ]; then
+  echo "  ! jq not found in trusted locations; shell.json registration will be skipped"
+fi
 OMARCHY_BIN="$(resolve_tool omarchy || true)"
+if [ -z "$OMARCHY_BIN" ]; then
+  echo "  ! omarchy command not found in trusted locations; the shell will not be restarted"
+fi
 
 # Verify that a file's SHA-256 matches the pinned release digest.
 verify_digest() {
@@ -262,7 +274,7 @@ uninstall() {
   fi
 
   if [ -n "$OMARCHY_BIN" ]; then
-    "$OMARCHY_BIN" restart shell 2>/dev/null || true
+    "$OMARCHY_BIN" restart shell 2>/dev/null || echo "  ! Could not restart the Omarchy shell; restart it manually to unload the widget"
   fi
   echo "==> Uninstalled successfully."
   exit 0
@@ -383,7 +395,7 @@ else
     exit 1
   fi
   "$CP_BIN" -f "$PLUGIN_SRC/bin/mixarchy-ctl" "$TARGET_DIR/bin/"
-  "$CP_BIN" -f "$PLUGIN_SRC/README.md" "$PLUGIN_SRC/LICENSE" "$TARGET_DIR/" 2>/dev/null || true
+  "$CP_BIN" -f "$PLUGIN_SRC/README.md" "$PLUGIN_SRC/LICENSE" "$TARGET_DIR/" 2>/dev/null || echo "  ! Could not copy README.md/LICENSE into $TARGET_DIR"
   "$CHMOD_BIN" +x "$TARGET_DIR/bin/mixarchy-ctl"
 fi
 echo "  ✓ Installed plugin: $TARGET_DIR"
@@ -415,7 +427,7 @@ fi
 #    and would wipe the user's bar layout.
 if [ -n "$OMARCHY_BIN" ]; then
   echo "  -> Restarting Omarchy shell..."
-  "$OMARCHY_BIN" restart shell 2>/dev/null || true
+  "$OMARCHY_BIN" restart shell 2>/dev/null || echo "  ! Could not restart the Omarchy shell; restart it manually to load the widget"
 fi
 
 echo "==> Mixarchy installed successfully."
