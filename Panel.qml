@@ -583,8 +583,8 @@ Panel {
   // build) must match the pinned digest before assignment; freshly built
   // cargo output is accepted only in opted-in developer mode, because a
   // local build can never match the stripped CI release pin.
-  readonly property string releaseTag: "v1.1.1"
-  readonly property string expectedSha256: "20ac824a623bcb237480375259a5551c0278f3ccd58795dd178b48b271f3a46b"
+  readonly property string releaseTag: "v1.2.0"
+  readonly property string expectedSha256: "d36441295824c4edae5ce677388ad7301a8032481d44b3cb63ee37c0a9067bf2"
 
   // Unpredictable temp path created exclusively by the trusted mktemp
   // process inside bin/ before any download writes to it. Never use a fixed
