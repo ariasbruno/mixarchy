@@ -12,3 +12,4 @@ ui_state.json
 .codegraph/
 # Local AI runtime state
 .atl/
+odd/
