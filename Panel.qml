@@ -1615,6 +1615,7 @@ Panel {
 
                     Text {
                       anchors.centerIn: parent
+                      visible: !isCurrent
                       text: "󰎆"
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
@@ -1631,14 +1632,22 @@ Panel {
                       clip: true
                       smooth: true
                     }
-                  }
 
-                  Text {
-                    visible: isCurrent
-                    text: root.isPlaying ? "" : "󰏤"
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    color: Commons.Color.accent
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: Style.cornerRadius
+                      visible: isCurrent && root.trackThumbs[modelData.id] !== undefined && root.trackThumbs[modelData.id] !== ""
+                      color: Qt.rgba(0, 0, 0, 0.45)
+                    }
+
+                    Text {
+                      anchors.centerIn: parent
+                      visible: isCurrent
+                      text: ""
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Commons.Color.accent
+                    }
                   }
 
                   ColumnLayout {
@@ -2255,16 +2264,6 @@ Panel {
                         anchors.rightMargin: Style.space(8)
                         spacing: Style.space(8)
 
-                        Text {
-                          text: isCurrentInQueue ? "󰝚" : ""
-                          font.family: Style.font.family
-                          font.pixelSize: Style.font.body
-                          font.weight: Font.Bold
-                          color: Commons.Color.accent
-                          Layout.preferredWidth: Style.space(16)
-                          horizontalAlignment: Text.AlignHCenter
-                        }
-
                         Rectangle {
                           Layout.preferredWidth: Style.space(24)
                           Layout.preferredHeight: Style.space(24)
@@ -2274,6 +2273,7 @@ Panel {
 
                           Text {
                             anchors.centerIn: parent
+                            visible: !isCurrentInQueue
                             text: "󰎆"
                             font.family: Style.font.family
                             font.pixelSize: Style.font.caption
@@ -2288,6 +2288,22 @@ Panel {
                             fillMode: Image.PreserveAspectCrop
                             clip: true
                             smooth: true
+                          }
+
+                          Rectangle {
+                            anchors.fill: parent
+                            radius: Style.cornerRadius
+                            visible: isCurrentInQueue && root.trackThumbs[modelData.id] !== undefined && root.trackThumbs[modelData.id] !== ""
+                            color: Qt.rgba(0, 0, 0, 0.45)
+                          }
+
+                          Text {
+                            anchors.centerIn: parent
+                            visible: isCurrentInQueue
+                            text: ""
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            color: Commons.Color.accent
                           }
                         }
 
