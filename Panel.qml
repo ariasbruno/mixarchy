@@ -1830,7 +1830,7 @@ Panel {
                   anchors.fill: parent
                   visible: !root.lyricsLoading && root.currentLyrics && root.currentLyrics.has_lyrics
                   clip: true
-                  spacing: Style.space(8)
+                  spacing: Style.space(10)
                   ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                   model: (root.currentLyrics && root.currentLyrics.lines) ? root.currentLyrics.lines : []
 
@@ -1882,7 +1882,7 @@ Panel {
 
                   delegate: Item {
                     width: lyricsListView.width
-                    implicitHeight: lyricLineText.implicitHeight + Style.space(8)
+                    implicitHeight: Math.ceil(lyricLineText.implicitHeight * 1.22) + Style.space(12)
 
                     readonly property bool isCurrentLine: {
                       if (!root.currentLyrics || !root.currentLyrics.synced) return false
@@ -1905,16 +1905,24 @@ Panel {
 
                     Text {
                       id: lyricLineText
-                      anchors.fill: parent
-                      anchors.leftMargin: Style.space(16)
-                      anchors.rightMargin: Style.space(16)
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(20)
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Math.max(100, parent.width - Style.space(64))
                       text: modelData.text || "♪"
                       font.family: Style.font.family
-                      font.pixelSize: isCurrentLine ? Style.font.subtitle : Style.font.body
+                      font.pixelSize: Style.space(16)
                       font.weight: isCurrentLine ? Font.Bold : Font.Normal
-                      color: isCurrentLine ? Commons.Color.accent : Qt.darker(Commons.Color.foreground, 1.3)
+                      color: isCurrentLine ? Commons.Color.accent : Qt.darker(Commons.Color.foreground, 1.2)
+                      opacity: isCurrentLine ? 1.0 : 0.42
+                      scale: isCurrentLine ? 1.20 : 1.0
+                      transformOrigin: Item.Left
                       horizontalAlignment: Text.AlignLeft
                       wrapMode: Text.WordWrap
+
+                      Behavior on scale { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                      Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+                      Behavior on color { ColorAnimation { duration: 250 } }
                     }
 
                     MouseArea {
