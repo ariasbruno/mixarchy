@@ -17,6 +17,11 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 - **Strict Buffer Tuning**: Demuxer buffers tuned to bare minimums (`--demuxer-max-bytes=2048KiB`, headless null video output) reducing active playback memory footprint to ~88–96 MB (~78% lower than Chromium web players).
 - **Zero-Daemon Architecture**: No resident background services or daemons eating system resources. The Rust controller runs ephemerally on-demand and exits in ~2 ms.
 
+### Now Playing Expanded View & Lyrics
+- **Big Cover Art**: High-resolution, adaptive album artwork display for the currently playing track.
+- **100% Local Synchronized Lyrics**: Zero cloud dependencies or telemetry. Reads timed lyrics directly from companion `.lrc` files or embedded audio tags (`USLT`, `LYRICS`) via Lofty. Features interactive click-to-seek, smooth active line scaling, overflow-safe wrapping, and an intelligent floating `Sync` button when manual scrolling is detected.
+- **Live Queue & Upcoming Track Removal**: Full playback queue view with one-click upcoming track removal (`✕`), seamless scroll position preservation across deletions, and a dynamic floating `Locate` pill (`󰆤 X/Total`) that appears only when the active track is scrolled off-screen.
+
 ### Library & Queue Management
 - **Instant Search with Queue Lock (`󰌿` / `󰌾`)**: Real-time filtering across titles, artists, and albums. Decoupled queue allows playing a search result within the full library, or toggling the lock button to restrict playback strictly to the search results.
 - **Deterministic Fisher-Yates Shuffle**: True randomized queue permutations that preserve reliable, bidirectional navigation (`Next` / `Prev`) without erratic jumps or duplicate repeats.
@@ -26,6 +31,7 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 
 ### UI & Desktop Integration
 - **Native Quickshell Bar Widget**: Integrates natively into Omarchy's Wayland desktop shell, matching active desktop themes and accent colors.
+- **Persistent Speaker Indicator**: Playing and selected tracks display a sleek, theme-accented speaker icon (``) overlaid directly on the album thumbnail with a contrast backdrop, keeping track title and artist columns consistently left-aligned with zero horizontal shifting.
 - **Embedded Album Cover Art & Thumbnails**: Automatic artwork extraction with cached 96x96 thumbnails for smooth list scrolling and full-resolution cover art for the now-playing view.
 - **Interactive Progress Scrub Bar**: Smooth hover scrubbing with real-time target timestamp preview and zero-flicker resume transitions.
 - **Minimalist Transport Controls**: Clean, modern `[⏮  ⏯  ⏭]` playback interface.
@@ -145,6 +151,12 @@ mixarchy-ctl stop                                  # Stop playback and release a
 mixarchy-ctl status                                # Get current playback status, track metadata, and time
 mixarchy-ctl library                               # Dump indexed library tracks and playlists
 mixarchy-ctl scan [dir]                            # Rescan music directory (defaults to ~/Music)
+
+# Queue & Lyrics
+mixarchy-ctl queue                                 # Dump active playback queue and current track index
+mixarchy-ctl queue-remove <index>                  # Remove specific upcoming track from active queue
+mixarchy-ctl play-index <index>                    # Jump playback directly to track index in queue
+mixarchy-ctl lyrics <id>                           # Fetch synchronized/plain lyrics for track from .lrc or tags
 
 # Cover Art & Thumbnails
 mixarchy-ctl cover <id>                            # Extract full-res cover as base64 data URI
