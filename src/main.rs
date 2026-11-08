@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use engine::{
     get_queue, get_status, next_track, play_queue_index, play_track, prev_track,
-    seek_playback, stop_playback, toggle_playback, toggle_shuffle,
+    remove_queue_index, seek_playback, stop_playback, toggle_playback, toggle_shuffle,
 };
 use library::{default_music_dir, load_library, load_state, scan_library};
 
@@ -19,7 +19,7 @@ fn main() {
         println!(
             "{}",
             serde_json::json!({
-                "error": "Usage: mixarchy-ctl [scan|library|status|queue|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics]"
+                "error": "Usage: mixarchy-ctl [scan|library|status|queue|queue-remove|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics]"
             })
         );
         return;
@@ -46,6 +46,17 @@ fn main() {
             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
         "status" => get_status(),
         "queue" => get_queue(),
+        "queue-remove" => {
+            if args.len() > 2 {
+                if let Ok(idx) = args[2].parse::<usize>() {
+                    remove_queue_index(idx)
+                } else {
+                    serde_json::json!({ "ok": false, "error": "Invalid index" })
+                }
+            } else {
+                serde_json::json!({ "ok": false, "error": "Missing index argument" })
+            }
+        }
         "play-index" => {
             if args.len() > 2 {
                 if let Ok(idx) = args[2].parse::<usize>() {

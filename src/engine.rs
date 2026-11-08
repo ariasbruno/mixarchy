@@ -523,6 +523,32 @@ pub fn play_queue_index(index: usize) -> serde_json::Value {
     play_track(&target, &source, index as i32, None, None)
 }
 
+pub fn remove_queue_index(index: usize) -> serde_json::Value {
+    let mut state = load_state();
+    if state.queue.is_empty() {
+        return serde_json::json!({ "ok": false, "error": "Empty queue" });
+    }
+    if index >= state.queue.len() {
+        return serde_json::json!({ "ok": false, "error": "Index out of bounds" });
+    }
+    if state.queue_index >= 0 && (index as i32) <= state.queue_index {
+        return serde_json::json!({
+            "ok": false,
+            "error": "Cannot remove current or previous tracks from queue"
+        });
+    }
+
+    state.queue.remove(index);
+    save_state(&state);
+    queue_next_preload(&state.queue, state.queue_index);
+
+    serde_json::json!({
+        "ok": true,
+        "queue_index": state.queue_index,
+        "queue_total": state.queue.len()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +557,13 @@ mod tests {
     fn test_play_queue_index_out_of_bounds() {
         // Any index beyond current queue length should cleanly return error
         let res = play_queue_index(usize::MAX);
+        assert_eq!(res["ok"], false);
+        assert_eq!(res["error"], "Index out of bounds");
+    }
+
+    #[test]
+    fn test_remove_queue_index_out_of_bounds() {
+        let res = remove_queue_index(usize::MAX);
         assert_eq!(res["ok"], false);
         assert_eq!(res["error"], "Index out of bounds");
     }

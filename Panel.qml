@@ -682,7 +682,7 @@ Panel {
   // cargo output is accepted only in opted-in developer mode, because a
   // local build can never match the stripped CI release pin.
   readonly property string releaseTag: "v1.2.0"
-  readonly property string expectedSha256: "f3cf6b1c8b6039ecfe8f74b6ac1625e6fad488d2155206ac3d350b03a9e8bf9b"
+  readonly property string expectedSha256: "f39f76880015be77cce9499b0e97da56a6639b410890535369884d5344eb5a6a"
 
   // Unpredictable temp path created exclusively by the trusted mktemp
   // process inside bin/ before any download writes to it. Never use a fixed
@@ -2118,6 +2118,7 @@ Panel {
                       required property int index
                       readonly property bool isCurrentInQueue: index === root.queueIndex
                       readonly property bool isPastInQueue: root.queueIndex >= 0 && index < root.queueIndex
+                      readonly property bool isUpcoming: root.queueIndex >= 0 && index > root.queueIndex
 
                       Component.onCompleted: {
                         root.requestCover(modelData.id, true)
@@ -2146,13 +2147,13 @@ Panel {
                         spacing: Style.space(8)
 
                         Text {
-                          text: isCurrentInQueue ? "󰝚" : String(index + 1)
+                          text: isCurrentInQueue ? "󰝚" : ""
                           font.family: Style.font.family
-                          font.pixelSize: isCurrentInQueue ? Style.font.body : Style.font.caption
-                          font.weight: isCurrentInQueue ? Font.Bold : Font.Normal
-                          color: isCurrentInQueue ? Commons.Color.accent : (isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4))
-                          Layout.minimumWidth: Style.space(20)
-                          horizontalAlignment: Text.AlignRight
+                          font.pixelSize: Style.font.body
+                          font.weight: Font.Bold
+                          color: Commons.Color.accent
+                          Layout.preferredWidth: Style.space(16)
+                          horizontalAlignment: Text.AlignHCenter
                         }
 
                         Rectangle {
@@ -2203,11 +2204,56 @@ Panel {
                           }
                         }
 
-                        Text {
-                          text: modelData.duration_str || "0:00"
-                          font.family: Style.font.family
-                          font.pixelSize: Style.font.caption
-                          color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
+                        Item {
+                          Layout.preferredWidth: Style.space(36)
+                          Layout.fillHeight: true
+
+                          Text {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: !removeHoverArea.containsMouse && (!qArea.containsMouse || !isUpcoming)
+                            text: modelData.duration_str || "0:00"
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
+                          }
+
+                          Rectangle {
+                            id: removeBtn
+                            visible: isUpcoming && qArea.containsMouse
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Style.space(22)
+                            height: Style.space(22)
+                            radius: Style.cornerRadius
+                            color: removeHoverArea.containsMouse ? Commons.Color.alert : "transparent"
+                            opacity: removeHoverArea.containsMouse ? 0.9 : 0.6
+                            z: 2
+
+                            Behavior on color { ColorAnimation { duration: 150 } }
+
+                            Text {
+                              anchors.centerIn: parent
+                              text: "✕"
+                              font.family: Style.font.family
+                              font.pixelSize: Style.font.caption
+                              font.weight: Font.Bold
+                              color: removeHoverArea.containsMouse ? Commons.Color.background : Commons.Color.foreground
+                            }
+
+                            MouseArea {
+                              id: removeHoverArea
+                              anchors.fill: parent
+                              hoverEnabled: true
+                              cursorShape: Qt.PointingHandCursor
+                              z: 10
+                              onClicked: {
+                                root.runCtl(["queue-remove", String(index)], function() {
+                                  root.fetchQueue()
+                                })
+                              }
+                            }
+                          }
                         }
                       }
 
