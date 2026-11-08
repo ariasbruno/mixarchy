@@ -121,6 +121,7 @@ Panel {
   property var currentLyrics: null
   property string lastLyricsTrackId: ""
   property bool lyricsLoading: false
+  property bool lyricsUserScrolled: false
 
   // Playback queue state
   property var playbackQueue: []
@@ -617,6 +618,7 @@ Panel {
           var res = JSON.parse(text)
           if (res.ok) {
             root.currentLyrics = res
+            root.lyricsUserScrolled = false
           } else {
             root.currentLyrics = null
           }
@@ -1128,6 +1130,7 @@ Panel {
       root.nowPlayingCover = ""
       root.currentLyrics = null
       root.lastLyricsTrackId = ""
+      root.lyricsUserScrolled = false
       if (newId !== "") {
         root.requestCover(newId, false)
         if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "lyrics") {
@@ -1831,8 +1834,27 @@ Panel {
                   visible: !root.lyricsLoading && root.currentLyrics && root.currentLyrics.has_lyrics
                   clip: true
                   spacing: Style.space(10)
-                  ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                  ScrollBar.vertical: ScrollBar {
+                    id: lyricScrollBar
+                    policy: ScrollBar.AsNeeded
+                    onActiveChanged: {
+                      if (active) root.lyricsUserScrolled = true
+                    }
+                  }
                   model: (root.currentLyrics && root.currentLyrics.lines) ? root.currentLyrics.lines : []
+
+                  onMovingChanged: {
+                    if (moving) root.lyricsUserScrolled = true
+                  }
+                  onFlickingChanged: {
+                    if (flicking) root.lyricsUserScrolled = true
+                  }
+
+                  WheelHandler {
+                    onWheel: (event) => {
+                      root.lyricsUserScrolled = true
+                    }
+                  }
 
                   NumberAnimation {
                     id: lyricScrollAnim
@@ -1842,8 +1864,10 @@ Panel {
                     easing.type: Easing.OutCubic
                   }
 
-                  function smoothScrollTo(index) {
-                    if (index < 0 || lyricsListView.moving || lyricsListView.flicking) return
+                  function smoothScrollTo(index, force) {
+                    if (index < 0) return
+                    if (root.lyricsUserScrolled && !force) return
+                    if (lyricsListView.moving || lyricsListView.flicking) return
                     var item = lyricsListView.itemAtIndex(index)
                     if (item) {
                       var targetY = item.y - (lyricsListView.height - item.height) / 2
@@ -1860,8 +1884,9 @@ Panel {
                     }
                   }
 
-                  function scrollToCurrent(smooth) {
+                  function scrollToCurrent(smooth, force) {
                     if (!root.currentLyrics || !root.currentLyrics.synced) return
+                    if (root.lyricsUserScrolled && !force) return
                     var lines = root.currentLyrics.lines || []
                     var t = root.timePos
                     for (var i = 0; i < lines.length; i++) {
@@ -1869,7 +1894,7 @@ Panel {
                       var nextTime = (i + 1 < lines.length) ? lines[i + 1].time : 999999
                       if (t >= myTime && t < nextTime) {
                         if (smooth) {
-                          smoothScrollTo(i)
+                          smoothScrollTo(i, force)
                         } else {
                           lyricsListView.positionViewAtIndex(i, ListView.Center)
                         }
@@ -1878,7 +1903,7 @@ Panel {
                     }
                   }
 
-                  onModelChanged: Qt.callLater(function() { scrollToCurrent(false) })
+                  onModelChanged: Qt.callLater(function() { scrollToCurrent(false, false) })
 
                   delegate: Item {
                     width: lyricsListView.width
@@ -1894,11 +1919,11 @@ Panel {
                     }
 
                     onIsCurrentLineChanged: {
-                      if (isCurrentLine) lyricsListView.smoothScrollTo(index)
+                      if (isCurrentLine && !root.lyricsUserScrolled) lyricsListView.smoothScrollTo(index, false)
                     }
 
                     Component.onCompleted: {
-                      if (isCurrentLine && !lyricsListView.moving && !lyricsListView.flicking) {
+                      if (isCurrentLine && !root.lyricsUserScrolled && !lyricsListView.moving && !lyricsListView.flicking) {
                         lyricsListView.positionViewAtIndex(index, ListView.Center)
                       }
                     }
@@ -1930,10 +1955,61 @@ Panel {
                       cursorShape: modelData.time >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
                       onClicked: {
                         if (modelData.time >= 0) {
+                          root.lyricsUserScrolled = false
                           root.seekTo(modelData.time)
-                          lyricsListView.smoothScrollTo(index)
+                          lyricsListView.smoothScrollTo(index, true)
                         }
                       }
+                    }
+                  }
+                }
+
+                // Floating Sync button when manual scroll was used
+                Rectangle {
+                  id: syncButton
+                  visible: root.lyricsUserScrolled && root.currentLyrics && root.currentLyrics.synced
+                  anchors.bottom: parent.bottom
+                  anchors.bottomMargin: Style.space(14)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  z: 30
+                  implicitWidth: syncRow.implicitWidth + Style.space(24)
+                  implicitHeight: Style.space(28)
+                  radius: Style.space(14)
+                  color: syncMa.containsMouse ? Commons.Color.accent : Commons.Color.background
+                  border.color: Commons.Color.accent
+                  border.width: 1
+
+                  Behavior on color { ColorAnimation { duration: 150 } }
+
+                  RowLayout {
+                    id: syncRow
+                    anchors.centerIn: parent
+                    spacing: Style.space(6)
+
+                    Text {
+                      text: "󰑐"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: syncMa.containsMouse ? Commons.Color.background : Commons.Color.accent
+                    }
+
+                    Text {
+                      text: "Sync"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      font.weight: Font.Bold
+                      color: syncMa.containsMouse ? Commons.Color.background : Commons.Color.accent
+                    }
+                  }
+
+                  MouseArea {
+                    id: syncMa
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    hoverEnabled: true
+                    onClicked: {
+                      root.lyricsUserScrolled = false
+                      lyricsListView.scrollToCurrent(true, true)
                     }
                   }
                 }
