@@ -126,6 +126,7 @@ Panel {
   // Playback queue state
   property var playbackQueue: []
   property bool queueLoading: false
+  property bool queueUserScrolled: false
 
   property string activePlaylistName: ""
   property var activePlaylistTrackPaths: []
@@ -1061,6 +1062,7 @@ Panel {
         root.fetchLyrics(root.currentTrack.id)
       }
     } else if (root.nowPlayingSubTab === "queue") {
+      root.queueUserScrolled = false
       root.fetchQueue()
     }
   }
@@ -1145,6 +1147,7 @@ Panel {
       root.currentLyrics = null
       root.lastLyricsTrackId = ""
       root.lyricsUserScrolled = false
+      root.queueUserScrolled = false
       if (newId !== "") {
         root.requestCover(newId, false)
         if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "lyrics") {
@@ -2129,105 +2132,105 @@ Panel {
               }
 
               // 3. Queue View
-              ColumnLayout {
+              Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: Style.space(4)
 
-                // Sub-header with queue position & jump button
-                RowLayout {
-                  Layout.fillWidth: true
-                  Layout.leftMargin: Style.space(4)
-                  Layout.rightMargin: Style.space(4)
-                  spacing: Style.space(6)
-
-                  Text {
-                    text: "Queue (" + root.playbackQueue.length + ")"
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.weight: Font.Bold
-                    color: Qt.darker(Commons.Color.foreground, 1.3)
-                    Layout.fillWidth: true
-                  }
-
-                  Button {
-                    visible: root.queueIndex >= 0 && root.queueIndex < root.playbackQueue.length
-                    iconText: "󰆤"
-                    text: (root.queueIndex + 1) + "/" + root.playbackQueue.length
-                    tooltipText: "Locate currently playing track"
-                    bordered: true
-                    onClicked: queueListView.scrollToCurrent(true)
-                  }
+                Text {
+                  anchors.centerIn: parent
+                  visible: root.queueLoading && root.playbackQueue.length === 0
+                  text: "Loading queue..."
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  color: Qt.darker(Commons.Color.foreground, 1.4)
                 }
 
-                Item {
-                  Layout.fillWidth: true
-                  Layout.fillHeight: true
+                ListView {
+                  id: queueListView
+                  anchors.fill: parent
+                  clip: true
+                  spacing: Style.space(3)
+                  ScrollBar.vertical: ScrollBar {
+                    id: queueScrollBar
+                    policy: ScrollBar.AsNeeded
+                    onActiveChanged: {
+                      if (active) root.queueUserScrolled = true
+                    }
+                  }
+                  model: root.playbackQueue
 
-                  Text {
-                    anchors.centerIn: parent
-                    visible: root.queueLoading && root.playbackQueue.length === 0
-                    text: "Loading queue..."
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    color: Qt.darker(Commons.Color.foreground, 1.4)
+                  onMovingChanged: {
+                    if (moving) root.queueUserScrolled = true
+                  }
+                  onFlickingChanged: {
+                    if (flicking) root.queueUserScrolled = true
                   }
 
-                  ListView {
-                    id: queueListView
-                    anchors.fill: parent
-                    clip: true
-                    spacing: Style.space(3)
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                    model: root.playbackQueue
-
-                    NumberAnimation {
-                      id: queueScrollAnim
-                      target: queueListView
-                      property: "contentY"
-                      duration: 350
-                      easing.type: Easing.OutCubic
+                  WheelHandler {
+                    onWheel: (event) => {
+                      root.queueUserScrolled = true
                     }
+                  }
 
-                    function scrollToCurrent(smooth) {
-                      if (root.queueIndex >= 0 && root.playbackQueue && root.queueIndex < root.playbackQueue.length) {
-                        if (smooth && !queueListView.moving && !queueListView.flicking) {
-                          var item = queueListView.itemAtIndex(root.queueIndex)
-                          if (item) {
-                            var targetY = item.y - (queueListView.height - item.height) / 2
-                            var maxContentY = Math.max(0, queueListView.contentHeight - queueListView.height)
-                            targetY = Math.max(0, Math.min(targetY, maxContentY))
-                            if (Math.abs(queueListView.contentY - targetY) > 1) {
-                              queueScrollAnim.stop()
-                              queueScrollAnim.from = queueListView.contentY
-                              queueScrollAnim.to = targetY
-                              queueScrollAnim.start()
-                              return
-                            }
+                  readonly property bool currentItemVisible: {
+                    if (root.queueIndex < 0 || !root.playbackQueue || root.queueIndex >= root.playbackQueue.length) return true
+                    var rowStep = Style.space(38) + Style.space(3)
+                    var itemTop = root.queueIndex * rowStep
+                    var itemBottom = itemTop + Style.space(38)
+                    return (itemBottom >= queueListView.contentY) && (itemTop <= (queueListView.contentY + queueListView.height))
+                  }
+
+                  NumberAnimation {
+                    id: queueScrollAnim
+                    target: queueListView
+                    property: "contentY"
+                    duration: 350
+                    easing.type: Easing.OutCubic
+                  }
+
+                  function scrollToCurrent(smooth) {
+                    root.queueUserScrolled = false
+                    if (root.queueIndex >= 0 && root.playbackQueue && root.queueIndex < root.playbackQueue.length) {
+                      if (smooth && !queueListView.moving && !queueListView.flicking) {
+                        var item = queueListView.itemAtIndex(root.queueIndex)
+                        if (item) {
+                          var targetY = item.y - (queueListView.height - item.height) / 2
+                          var maxContentY = Math.max(0, queueListView.contentHeight - queueListView.height)
+                          targetY = Math.max(0, Math.min(targetY, maxContentY))
+                          if (Math.abs(queueListView.contentY - targetY) > 1) {
+                            queueScrollAnim.stop()
+                            queueScrollAnim.from = queueListView.contentY
+                            queueScrollAnim.to = targetY
+                            queueScrollAnim.start()
+                            return
                           }
                         }
-                        queueListView.positionViewAtIndex(root.queueIndex, ListView.Center)
                       }
+                      queueListView.positionViewAtIndex(root.queueIndex, ListView.Center)
                     }
+                  }
 
-                    Connections {
-                      target: root
-                      function onQueueIndexChanged() {
-                        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
-                          queueListView.scrollToCurrent(true)
-                        }
-                      }
-                      function onNowPlayingSubTabChanged() {
-                        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
-                          Qt.callLater(function() { queueListView.scrollToCurrent(false) })
-                        }
-                      }
-                      function onCurrentScreenChanged() {
-                        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
-                          Qt.callLater(function() { queueListView.scrollToCurrent(false) })
-                        }
+                  Connections {
+                    target: root
+                    function onQueueIndexChanged() {
+                      root.queueUserScrolled = false
+                      if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                        queueListView.scrollToCurrent(true)
                       }
                     }
+                    function onNowPlayingSubTabChanged() {
+                      if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                        root.queueUserScrolled = false
+                        Qt.callLater(function() { queueListView.scrollToCurrent(false) })
+                      }
+                    }
+                    function onCurrentScreenChanged() {
+                      if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                        root.queueUserScrolled = false
+                        Qt.callLater(function() { queueListView.scrollToCurrent(false) })
+                      }
+                    }
+                  }
 
                     delegate: BorderSurface {
                       id: rowSurface
@@ -2396,11 +2399,60 @@ Panel {
                       }
                     }
                   }
+
+                  // Floating Locate button when current track is scrolled out of view
+                  Rectangle {
+                    id: queueLocateButton
+                    visible: root.queueUserScrolled && !queueListView.currentItemVisible && root.queueIndex >= 0 && root.playbackQueue && root.queueIndex < root.playbackQueue.length
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: Style.space(14)
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    z: 30
+                    implicitWidth: queueLocateRow.implicitWidth + Style.space(24)
+                    implicitHeight: Style.space(28)
+                    radius: Style.space(14)
+                    color: queueLocateMa.containsMouse ? Commons.Color.accent : Commons.Color.background
+                    border.color: Commons.Color.accent
+                    border.width: 1
+
+                    Behavior on color { ColorAnimation { duration: 150 } }
+
+                    RowLayout {
+                      id: queueLocateRow
+                      anchors.centerIn: parent
+                      spacing: Style.space(6)
+
+                      Text {
+                        text: "󰆤"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        color: queueLocateMa.containsMouse ? Commons.Color.background : Commons.Color.accent
+                      }
+
+                      Text {
+                        text: (root.queueIndex + 1) + "/" + root.playbackQueue.length
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.weight: Font.Bold
+                        color: queueLocateMa.containsMouse ? Commons.Color.background : Commons.Color.accent
+                      }
+                    }
+
+                    MouseArea {
+                      id: queueLocateMa
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      hoverEnabled: true
+                      onClicked: {
+                        root.queueUserScrolled = false
+                        queueListView.scrollToCurrent(true)
+                      }
+                    }
+                  }
                 }
               }
             }
           }
-        }
 
         PanelSeparator { Layout.fillWidth: true }
 
