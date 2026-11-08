@@ -1,14 +1,15 @@
 mod cover;
 mod engine;
 mod library;
+mod lyrics;
 mod models;
 mod trusted;
 
 use std::path::PathBuf;
 
 use engine::{
-    get_status, next_track, play_track, prev_track, seek_playback, stop_playback,
-    toggle_playback, toggle_shuffle,
+    get_queue, get_status, next_track, play_queue_index, play_track, prev_track,
+    seek_playback, stop_playback, toggle_playback, toggle_shuffle,
 };
 use library::{default_music_dir, load_library, load_state, scan_library};
 
@@ -18,7 +19,7 @@ fn main() {
         println!(
             "{}",
             serde_json::json!({
-                "error": "Usage: mixarchy-ctl [scan|library|status|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover]"
+                "error": "Usage: mixarchy-ctl [scan|library|status|queue|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics]"
             })
         );
         return;
@@ -44,6 +45,18 @@ fn main() {
         "library" => serde_json::to_value(load_library())
             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
         "status" => get_status(),
+        "queue" => get_queue(),
+        "play-index" => {
+            if args.len() > 2 {
+                if let Ok(idx) = args[2].parse::<usize>() {
+                    play_queue_index(idx)
+                } else {
+                    serde_json::json!({ "ok": false, "error": "Invalid index" })
+                }
+            } else {
+                serde_json::json!({ "ok": false, "error": "Missing index argument" })
+            }
+        }
         "play" => {
             if args.len() > 2 {
                 let track_path = &args[2];
@@ -115,6 +128,14 @@ fn main() {
             let id = args.get(if thumb_only { 3 } else { 2 }).map(|s| s.as_str());
             match id {
                 Some(id) => cover::get_cover(id, thumb_only),
+                None => serde_json::json!({ "ok": false, "error": "Missing track id" }),
+            }
+        }
+        "lyrics" => {
+            let id = args.get(2).map(|s| s.as_str());
+            match id {
+                Some(id) => serde_json::to_value(lyrics::get_lyrics(id))
+                    .unwrap_or_else(|e| serde_json::json!({ "ok": false, "error": e.to_string() })),
                 None => serde_json::json!({ "ok": false, "error": "Missing track id" }),
             }
         }

@@ -13,6 +13,21 @@ Panel {
   ipcTarget: "ariasbruno.mixarchy"
   manageIpc: true
 
+  IpcHandler {
+    target: "mixarchy"
+    function showNowPlaying(): void {
+      root.open()
+      root.currentScreen = "nowplaying"
+      root.syncNowPlayingTab()
+    }
+    function setSubTab(tab: string): void {
+      root.open()
+      root.currentScreen = "nowplaying"
+      root.nowPlayingSubTab = tab
+      root.syncNowPlayingTab()
+    }
+  }
+
   readonly property string homeDir: Quickshell.env("HOME") || ""
   // Percent-decode the resolved URL (a path with spaces arrives as file:///...%20...);
   // fall back to the raw path on malformed input rather than crashing (fail-safe).
@@ -99,7 +114,18 @@ Panel {
   implicitHeight: button.implicitHeight
 
   // State
-  property string currentScreen: "tracks" // "tracks" | "playlists"
+  property string currentScreen: "tracks" // "tracks" | "playlists" | "nowplaying"
+  property string nowPlayingSubTab: "cover" // "cover" | "lyrics" | "queue"
+
+  // Lyrics state
+  property var currentLyrics: null
+  property string lastLyricsTrackId: ""
+  property bool lyricsLoading: false
+
+  // Playback queue state
+  property var playbackQueue: []
+  property bool queueLoading: false
+
   property string activePlaylistName: ""
   property var activePlaylistTrackPaths: []
   property string searchFilter: ""
@@ -335,9 +361,13 @@ Panel {
             root.isMpvRunning = !!res.running
             root.isPaused = res.is_paused
             root.shuffle = res.shuffle
-            root.currentTrack = res.track
+            var curId = (root.currentTrack && root.currentTrack.id) ? root.currentTrack.id : ""
+            var newId = (res.track && res.track.id) ? res.track.id : ""
+            if (curId !== newId || (!root.currentTrack && res.track) || (root.currentTrack && !res.track)) {
+              root.currentTrack = res.track
+            }
             root.sourceName = res.source_name || "Tracks"
-            root.queueIndex = res.queue_index || 0
+            root.queueIndex = (res.queue_index !== undefined && res.queue_index > 0) ? (res.queue_index - 1) : 0
             root.queueTotal = res.queue_total || 0
             root.timePos = res.time_pos || 0
             root.duration = res.duration || 0
@@ -573,6 +603,71 @@ Panel {
     }
   }
 
+  Process {
+    id: lyricsProc
+    property string pendingId: ""
+    property bool sawExited: false
+    clearEnvironment: true
+    environment: root.cleanEnv
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.lyricsLoading = false
+        try {
+          var res = JSON.parse(text)
+          if (res.ok) {
+            root.currentLyrics = res
+          } else {
+            root.currentLyrics = null
+          }
+        } catch (e) {
+          root.currentLyrics = null
+        }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      lyricsProc.sawExited = true
+    }
+    onRunningChanged: {
+      if (lyricsProc.running) {
+        lyricsProc.sawExited = false
+      } else if (!lyricsProc.sawExited) {
+        root.lyricsLoading = false
+      }
+    }
+  }
+
+  Process {
+    id: queueProc
+    property bool sawExited: false
+    clearEnvironment: true
+    environment: root.cleanEnv
+    command: [root.ctlPath, "queue"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.queueLoading = false
+        try {
+          var res = JSON.parse(text)
+          if (res.ok && res.tracks) {
+            root.playbackQueue = res.tracks
+            root.queueIndex = res.queue_index
+          }
+        } catch (e) { }
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      queueProc.sawExited = true
+    }
+    onRunningChanged: {
+      if (queueProc.running) {
+        queueProc.sawExited = false
+      } else if (!queueProc.sawExited) {
+        root.queueLoading = false
+      }
+    }
+  }
+
   // ------------------------------------------------------------- Bootstrap
   // Single dispatcher process drives the whole bootstrap state machine.
   // Every automatic boundary clears the inherited environment and uses only
@@ -585,7 +680,7 @@ Panel {
   // cargo output is accepted only in opted-in developer mode, because a
   // local build can never match the stripped CI release pin.
   readonly property string releaseTag: "v1.2.0"
-  readonly property string expectedSha256: "d36441295824c4edae5ce677388ad7301a8032481d44b3cb63ee37c0a9067bf2"
+  readonly property string expectedSha256: "f3cf6b1c8b6039ecfe8f74b6ac1625e6fad488d2155206ac3d350b03a9e8bf9b"
 
   // Unpredictable temp path created exclusively by the trusted mktemp
   // process inside bin/ before any download writes to it. Never use a fixed
@@ -922,6 +1017,38 @@ Panel {
     runCtl(["seek", String(sec)])
   }
 
+  function fetchLyrics(id) {
+    if (!id || !root.bootstrapped) return
+    if (root.lastLyricsTrackId === id && root.currentLyrics) return
+    root.lastLyricsTrackId = id
+    root.lyricsLoading = true
+    lyricsProc.pendingId = id
+    lyricsProc.command = [root.ctlPath, "lyrics", id]
+    lyricsProc.sawExited = false
+    lyricsProc.running = true
+  }
+
+  function fetchQueue() {
+    if (!root.bootstrapped) return
+    if (!root.playbackQueue || root.playbackQueue.length === 0) {
+      root.queueLoading = true
+    }
+    queueProc.command = [root.ctlPath, "queue"]
+    queueProc.sawExited = false
+    queueProc.running = true
+  }
+
+  function syncNowPlayingTab() {
+    if (root.currentScreen !== "nowplaying") return
+    if (root.nowPlayingSubTab === "lyrics") {
+      if (root.currentTrack && root.currentTrack.id) {
+        root.fetchLyrics(root.currentTrack.id)
+      }
+    } else if (root.nowPlayingSubTab === "queue") {
+      root.fetchQueue()
+    }
+  }
+
   function formatSec(sec) {
     var s = Math.max(0, Math.floor(sec))
     var m = Math.floor(s / 60)
@@ -999,8 +1126,16 @@ Panel {
     if (newId !== root.lastPlayingTrackId) {
       root.lastPlayingTrackId = newId
       root.nowPlayingCover = ""
+      root.currentLyrics = null
+      root.lastLyricsTrackId = ""
       if (newId !== "") {
         root.requestCover(newId, false)
+        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "lyrics") {
+          root.fetchLyrics(newId)
+        }
+        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+          root.fetchQueue()
+        }
       }
     }
   }
@@ -1187,6 +1322,18 @@ Panel {
             onClicked: root.currentScreen = "playlists"
           }
 
+          Button {
+            visible: root.currentTrack !== null
+            iconText: "󰝚"
+            tooltipText: "Now Playing"
+            bordered: true
+            selected: root.currentScreen === "nowplaying"
+            onClicked: {
+              root.currentScreen = "nowplaying"
+              root.syncNowPlayingTab()
+            }
+          }
+
           Item { Layout.fillWidth: true }
 
           Button {
@@ -1203,7 +1350,7 @@ Panel {
         StackLayout {
           Layout.fillWidth: true
           Layout.fillHeight: true
-          currentIndex: root.currentScreen === "tracks" ? 0 : 1
+          currentIndex: root.currentScreen === "tracks" ? 0 : (root.currentScreen === "playlists" ? 1 : 2)
 
           // ---------------------------------------- TAB 1: TRACKS (DEFAULT)
           ColumnLayout {
@@ -1509,6 +1656,504 @@ Panel {
               }
             }
           }
+
+          // ---------------------------------------- TAB 3: NOW PLAYING EXPANDED
+          ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: Style.space(6)
+
+            // Sub-navigation bar inside Now Playing
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(4)
+
+              Button {
+                iconText: "󰁍"
+                tooltipText: "Back to Library"
+                bordered: true
+                onClicked: root.currentScreen = "tracks"
+              }
+
+              Item { Layout.fillWidth: true }
+
+              Button {
+                iconText: "󰋩"
+                text: "Cover"
+                bordered: true
+                selected: root.nowPlayingSubTab === "cover"
+                onClicked: root.nowPlayingSubTab = "cover"
+              }
+
+              Button {
+                iconText: "󰨖"
+                text: "Lyrics"
+                bordered: true
+                selected: root.nowPlayingSubTab === "lyrics"
+                onClicked: {
+                  root.nowPlayingSubTab = "lyrics"
+                  if (root.currentTrack && root.currentTrack.id) {
+                    root.fetchLyrics(root.currentTrack.id)
+                  }
+                }
+              }
+
+              Button {
+                iconText: ""
+                text: "Queue"
+                bordered: true
+                selected: root.nowPlayingSubTab === "queue"
+                onClicked: {
+                  root.nowPlayingSubTab = "queue"
+                  root.fetchQueue()
+                }
+              }
+            }
+
+            PanelSeparator { Layout.fillWidth: true }
+
+            // Sub-tab content
+            StackLayout {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              currentIndex: root.nowPlayingSubTab === "cover" ? 0 : (root.nowPlayingSubTab === "lyrics" ? 1 : 2)
+
+              // 1. Big Cover Art
+              ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: Style.space(10)
+
+                Item { Layout.fillHeight: true }
+
+                Rectangle {
+                  Layout.alignment: Qt.AlignHCenter
+                  Layout.preferredWidth: Math.min(panel.width - Style.space(32), Style.space(290))
+                  Layout.preferredHeight: Layout.preferredWidth
+                  radius: Style.cornerRadius
+                  color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+                  clip: true
+
+                  Text {
+                    anchors.centerIn: parent
+                    visible: !bigCoverImg.visible
+                    text: "󰎆"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.display
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
+                  }
+
+                  Image {
+                    id: bigCoverImg
+                    anchors.fill: parent
+                    visible: root.nowPlayingCover !== ""
+                    source: root.nowPlayingCover
+                    fillMode: Image.PreserveAspectCrop
+                    smooth: true
+                  }
+
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: parent.radius
+                    color: "transparent"
+                    border.width: 1
+                    border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.2)
+                  }
+                }
+
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  Layout.leftMargin: Style.space(16)
+                  Layout.rightMargin: Style.space(16)
+                  spacing: Style.space(2)
+                  Layout.alignment: Qt.AlignHCenter
+
+                  Text {
+                    text: root.currentTrack ? (root.currentTrack.title || root.currentTrack.filename) : "No playback"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.heading
+                    font.weight: Font.Bold
+                    color: Commons.Color.foreground
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+
+                  Text {
+                    text: root.currentTrack ? (root.currentTrack.artist + (root.currentTrack.album ? (" · " + root.currentTrack.album) : "")) : ""
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                  }
+                }
+
+                Item { Layout.fillHeight: true }
+              }
+
+              // 2. Lyrics View
+              Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                Text {
+                  anchors.centerIn: parent
+                  visible: root.lyricsLoading
+                  text: "Loading lyrics..."
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  color: Qt.darker(Commons.Color.foreground, 1.4)
+                }
+
+                ColumnLayout {
+                  anchors.centerIn: parent
+                  visible: !root.lyricsLoading && (!root.currentLyrics || !root.currentLyrics.has_lyrics)
+                  spacing: Style.space(8)
+
+                  Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "󰨖"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.display
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
+                  }
+                  Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "No local lyrics found"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
+                  }
+                  Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Add a .lrc file next to the track or embed lyrics in tags"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    color: Qt.darker(Commons.Color.foreground, 1.8)
+                  }
+                }
+
+                ListView {
+                  id: lyricsListView
+                  anchors.fill: parent
+                  visible: !root.lyricsLoading && root.currentLyrics && root.currentLyrics.has_lyrics
+                  clip: true
+                  spacing: Style.space(8)
+                  ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                  model: (root.currentLyrics && root.currentLyrics.lines) ? root.currentLyrics.lines : []
+
+                  NumberAnimation {
+                    id: lyricScrollAnim
+                    target: lyricsListView
+                    property: "contentY"
+                    duration: 350
+                    easing.type: Easing.OutCubic
+                  }
+
+                  function smoothScrollTo(index) {
+                    if (index < 0 || lyricsListView.moving || lyricsListView.flicking) return
+                    var item = lyricsListView.itemAtIndex(index)
+                    if (item) {
+                      var targetY = item.y - (lyricsListView.height - item.height) / 2
+                      var maxContentY = Math.max(0, lyricsListView.contentHeight - lyricsListView.height)
+                      targetY = Math.max(0, Math.min(targetY, maxContentY))
+                      if (Math.abs(lyricsListView.contentY - targetY) > 1) {
+                        lyricScrollAnim.stop()
+                        lyricScrollAnim.from = lyricsListView.contentY
+                        lyricScrollAnim.to = targetY
+                        lyricScrollAnim.start()
+                      }
+                    } else {
+                      lyricsListView.positionViewAtIndex(index, ListView.Center)
+                    }
+                  }
+
+                  function scrollToCurrent(smooth) {
+                    if (!root.currentLyrics || !root.currentLyrics.synced) return
+                    var lines = root.currentLyrics.lines || []
+                    var t = root.timePos
+                    for (var i = 0; i < lines.length; i++) {
+                      var myTime = lines[i].time
+                      var nextTime = (i + 1 < lines.length) ? lines[i + 1].time : 999999
+                      if (t >= myTime && t < nextTime) {
+                        if (smooth) {
+                          smoothScrollTo(i)
+                        } else {
+                          lyricsListView.positionViewAtIndex(i, ListView.Center)
+                        }
+                        break
+                      }
+                    }
+                  }
+
+                  onModelChanged: Qt.callLater(function() { scrollToCurrent(false) })
+
+                  delegate: Item {
+                    width: lyricsListView.width
+                    implicitHeight: lyricLineText.implicitHeight + Style.space(8)
+
+                    readonly property bool isCurrentLine: {
+                      if (!root.currentLyrics || !root.currentLyrics.synced) return false
+                      var lines = root.currentLyrics.lines || []
+                      var myTime = modelData.time
+                      if (myTime < 0) return false
+                      var nextTime = (index + 1 < lines.length) ? lines[index + 1].time : 999999
+                      return root.timePos >= myTime && root.timePos < nextTime
+                    }
+
+                    onIsCurrentLineChanged: {
+                      if (isCurrentLine) lyricsListView.smoothScrollTo(index)
+                    }
+
+                    Component.onCompleted: {
+                      if (isCurrentLine && !lyricsListView.moving && !lyricsListView.flicking) {
+                        lyricsListView.positionViewAtIndex(index, ListView.Center)
+                      }
+                    }
+
+                    Text {
+                      id: lyricLineText
+                      anchors.fill: parent
+                      anchors.leftMargin: Style.space(16)
+                      anchors.rightMargin: Style.space(16)
+                      text: modelData.text || "♪"
+                      font.family: Style.font.family
+                      font.pixelSize: isCurrentLine ? Style.font.subtitle : Style.font.body
+                      font.weight: isCurrentLine ? Font.Bold : Font.Normal
+                      color: isCurrentLine ? Commons.Color.accent : Qt.darker(Commons.Color.foreground, 1.3)
+                      horizontalAlignment: Text.AlignLeft
+                      wrapMode: Text.WordWrap
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: modelData.time >= 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: {
+                        if (modelData.time >= 0) {
+                          root.seekTo(modelData.time)
+                          lyricsListView.smoothScrollTo(index)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              // 3. Queue View
+              ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: Style.space(4)
+
+                // Sub-header with queue position & jump button
+                RowLayout {
+                  Layout.fillWidth: true
+                  Layout.leftMargin: Style.space(4)
+                  Layout.rightMargin: Style.space(4)
+                  spacing: Style.space(6)
+
+                  Text {
+                    text: "Queue (" + root.playbackQueue.length + ")"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.weight: Font.Bold
+                    color: Qt.darker(Commons.Color.foreground, 1.3)
+                    Layout.fillWidth: true
+                  }
+
+                  Button {
+                    visible: root.queueIndex >= 0 && root.queueIndex < root.playbackQueue.length
+                    iconText: "󰆤"
+                    text: (root.queueIndex + 1) + "/" + root.playbackQueue.length
+                    tooltipText: "Locate currently playing track"
+                    bordered: true
+                    onClicked: queueListView.scrollToCurrent(true)
+                  }
+                }
+
+                Item {
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+
+                  Text {
+                    anchors.centerIn: parent
+                    visible: root.queueLoading && root.playbackQueue.length === 0
+                    text: "Loading queue..."
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
+                  }
+
+                  ListView {
+                    id: queueListView
+                    anchors.fill: parent
+                    clip: true
+                    spacing: Style.space(3)
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    model: root.playbackQueue
+
+                    NumberAnimation {
+                      id: queueScrollAnim
+                      target: queueListView
+                      property: "contentY"
+                      duration: 350
+                      easing.type: Easing.OutCubic
+                    }
+
+                    function scrollToCurrent(smooth) {
+                      if (root.queueIndex >= 0 && root.playbackQueue && root.queueIndex < root.playbackQueue.length) {
+                        if (smooth && !queueListView.moving && !queueListView.flicking) {
+                          var item = queueListView.itemAtIndex(root.queueIndex)
+                          if (item) {
+                            var targetY = item.y - (queueListView.height - item.height) / 2
+                            var maxContentY = Math.max(0, queueListView.contentHeight - queueListView.height)
+                            targetY = Math.max(0, Math.min(targetY, maxContentY))
+                            if (Math.abs(queueListView.contentY - targetY) > 1) {
+                              queueScrollAnim.stop()
+                              queueScrollAnim.from = queueListView.contentY
+                              queueScrollAnim.to = targetY
+                              queueScrollAnim.start()
+                              return
+                            }
+                          }
+                        }
+                        queueListView.positionViewAtIndex(root.queueIndex, ListView.Center)
+                      }
+                    }
+
+                    onModelChanged: Qt.callLater(function() { scrollToCurrent(false) })
+
+                    Connections {
+                      target: root
+                      function onQueueIndexChanged() {
+                        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                          queueListView.scrollToCurrent(true)
+                        }
+                      }
+                      function onNowPlayingSubTabChanged() {
+                        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                          Qt.callLater(function() { queueListView.scrollToCurrent(false) })
+                        }
+                      }
+                    }
+
+                    delegate: BorderSurface {
+                      required property var modelData
+                      required property int index
+                      readonly property bool isCurrentInQueue: index === root.queueIndex
+                      readonly property bool isPastInQueue: root.queueIndex >= 0 && index < root.queueIndex
+
+                      Component.onCompleted: {
+                        root.requestCover(modelData.id, true)
+                        if (isCurrentInQueue) {
+                          queueListView.positionViewAtIndex(index, ListView.Center)
+                        }
+                      }
+
+                      width: queueListView.width
+                      implicitHeight: Style.space(38)
+                      radius: Style.cornerRadius
+                      opacity: isPastInQueue ? (qArea.containsMouse ? 0.8 : 0.45) : 1.0
+                      Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                      borderSpec: isCurrentInQueue || qArea.containsMouse
+                        ? Border.controlSpec(isCurrentInQueue ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
+                        : Border.none()
+                      color: isCurrentInQueue
+                        ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
+                        : (qArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
+
+                      RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Style.space(8)
+                        anchors.rightMargin: Style.space(8)
+                        spacing: Style.space(8)
+
+                        Text {
+                          text: isCurrentInQueue ? "󰝚" : String(index + 1)
+                          font.family: Style.font.family
+                          font.pixelSize: isCurrentInQueue ? Style.font.body : Style.font.caption
+                          font.weight: isCurrentInQueue ? Font.Bold : Font.Normal
+                          color: isCurrentInQueue ? Commons.Color.accent : (isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4))
+                          Layout.minimumWidth: Style.space(20)
+                          horizontalAlignment: Text.AlignRight
+                        }
+
+                        Rectangle {
+                          Layout.preferredWidth: Style.space(24)
+                          Layout.preferredHeight: Style.space(24)
+                          Layout.alignment: Qt.AlignVCenter
+                          radius: Style.cornerRadius
+                          color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+
+                          Text {
+                            anchors.centerIn: parent
+                            text: "󰎆"
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            color: Qt.darker(Commons.Color.foreground, 1.4)
+                          }
+
+                          Image {
+                            anchors.fill: parent
+                            visible: root.trackThumbs[modelData.id] !== undefined && root.trackThumbs[modelData.id] !== ""
+                            source: visible ? ("file://" + root.trackThumbs[modelData.id]) : ""
+                            sourceSize: Qt.size(96, 96)
+                            fillMode: Image.PreserveAspectCrop
+                            clip: true
+                            smooth: true
+                          }
+                        }
+
+                        ColumnLayout {
+                          Layout.fillWidth: true
+                          spacing: 0
+                          Text {
+                            text: modelData.title || modelData.filename
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.body
+                            font.weight: isCurrentInQueue ? Font.Bold : Font.Normal
+                            color: isCurrentInQueue ? Commons.Color.accent : (isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.4) : Commons.Color.foreground)
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                          }
+                          Text {
+                            text: (modelData.artist || "Unknown")
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                          }
+                        }
+
+                        Text {
+                          text: modelData.duration_str || "0:00"
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
+                        }
+                      }
+
+                      MouseArea {
+                        id: qArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                          root.runCtl(["play-index", String(index)], function() {
+                            root.fetchQueue()
+                          })
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
 
         PanelSeparator { Layout.fillWidth: true }
@@ -1534,69 +2179,88 @@ Panel {
               Layout.fillWidth: true
               spacing: Style.space(8)
 
-              // Album cover for the now-playing area. Source is a data URI
-              // returned on-demand by `mixarchy-ctl cover`; never polled.
-              // Sized to fit inside the 72px control bar (56px usable);
-              // placeholder box always visible so the layout never jumps.
-              Rectangle {
-                id: nowPlayingCoverBox
-                Layout.preferredWidth: Style.space(36)
+              // Track info area (clickable to toggle Now Playing view)
+              Item {
+                Layout.fillWidth: true
                 Layout.preferredHeight: Style.space(36)
-                Layout.alignment: Qt.AlignVCenter
-                radius: Style.cornerRadius
-                color: Style.normalFillFor(root.foreground, Commons.Color.accent)
 
-                Text {
-                  anchors.centerIn: parent
-                  text: "󰎆"
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  color: Qt.darker(Commons.Color.foreground, 1.4)
-                }
-
-                Image {
-                  id: nowPlayingCoverImg
+                RowLayout {
                   anchors.fill: parent
-                  visible: root.nowPlayingCover !== ""
-                  source: root.nowPlayingCover
-                  sourceSize: Qt.size(96, 96)
-                  fillMode: Image.PreserveAspectCrop
-                  clip: true
-                  smooth: true
+                  spacing: Style.space(8)
 
+                  // Album cover for the now-playing area.
                   Rectangle {
-                    anchors.fill: parent
+                    id: nowPlayingCoverBox
+                    Layout.preferredWidth: Style.space(36)
+                    Layout.preferredHeight: Style.space(36)
+                    Layout.alignment: Qt.AlignVCenter
                     radius: Style.cornerRadius
-                    color: "transparent"
-                    border.width: 1
-                    border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.15)
+                    color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+
+                    Text {
+                      anchors.centerIn: parent
+                      text: "󰎆"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      color: Qt.darker(Commons.Color.foreground, 1.4)
+                    }
+
+                    Image {
+                      id: nowPlayingCoverImg
+                      anchors.fill: parent
+                      visible: root.nowPlayingCover !== ""
+                      source: root.nowPlayingCover
+                      sourceSize: Qt.size(96, 96)
+                      fillMode: Image.PreserveAspectCrop
+                      clip: true
+                      smooth: true
+
+                      Rectangle {
+                        anchors.fill: parent
+                        radius: Style.cornerRadius
+                        color: "transparent"
+                        border.width: 1
+                        border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.15)
+                      }
+                    }
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+
+                    Text {
+                      text: root.currentTrack ? (root.currentTrack.title || root.currentTrack.filename) : "No playback"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      font.weight: Font.Bold
+                      color: Commons.Color.foreground
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
+                    }
+
+                    Text {
+                      text: root.currentTrack
+                        ? (root.currentTrack.artist + " · 󰘸 Expand")
+                        : (root.trackCount + " tracks available")
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(Commons.Color.foreground, 1.4)
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
+                    }
                   }
                 }
-              }
 
-              ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 1
-
-                Text {
-                  text: root.currentTrack ? (root.currentTrack.title || root.currentTrack.filename) : "No playback"
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.weight: Font.Bold
-                  color: Commons.Color.foreground
-                  elide: Text.ElideRight
-                  Layout.fillWidth: true
-                }
-
-                Text {
-                  text: root.currentTrack
-                    ? root.currentTrack.artist
-                    : (root.trackCount + " tracks available")
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  color: Qt.darker(Commons.Color.foreground, 1.4)
-                  elide: Text.ElideRight
-                  Layout.fillWidth: true
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: root.currentTrack ? Qt.PointingHandCursor : Qt.ArrowCursor
+                  onClicked: {
+                    if (root.currentTrack) {
+                      root.currentScreen = root.currentScreen === "nowplaying" ? "tracks" : "nowplaying"
+                      root.syncNowPlayingTab()
+                    }
+                  }
                 }
               }
 
