@@ -18,8 +18,9 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 - **Zero-Daemon Architecture**: No resident background services or daemons eating system resources. The Rust controller runs ephemerally on-demand and exits in ~2 ms.
 
 ### Now Playing Expanded View & Lyrics
+- **Seamless View Switching**: Click the `󰝚` button in the header bar to expand the currently playing track, and `󰁍` to return to the library. Toggle between **Lyrics** and **Queue** sub-tabs, or leave both unselected to enjoy the full-size artwork.
 - **Big Cover Art**: High-resolution, adaptive album artwork display for the currently playing track.
-- **100% Local Synchronized Lyrics**: Zero cloud dependencies or telemetry. Reads timed lyrics directly from companion `.lrc` files or embedded audio tags (`USLT`, `LYRICS`) via Lofty. Features interactive click-to-seek, smooth active line scaling, overflow-safe wrapping, and an intelligent floating `Sync` button when manual scrolling is detected.
+- **100% Local Synchronized Lyrics**: Zero cloud dependencies or telemetry. Reads timed lyrics directly from companion `.lrc` files (in the track's folder) or embedded audio tags (`USLT`, `LYRICS`) via Lofty. Features interactive click-to-seek, smooth active line scaling, overflow-safe wrapping, and an intelligent floating `Sync` button when manual scrolling is detected.
 - **Live Queue & Upcoming Track Removal**: Full playback queue view with one-click upcoming track removal (`✕`), seamless scroll position preservation across deletions, and a dynamic floating `Locate` pill (`󰆤 X/Total`) that appears only when the active track is scrolled off-screen.
 
 ### Library & Queue Management
@@ -51,6 +52,25 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
   - **Lossless**: FLAC (`.flac`), ALAC / AAC (`.m4a`), WAV (`.wav`)
   - **Lossy**: MP3 (`.mp3`), Opus (`.opus`), OGG Vorbis (`.ogg`)
   - **Playlists**: `.m3u` and `.m3u8` (resolved relative to playlist file location)
+
+---
+
+## Keyboard Navigation
+
+Designed for keyboard-centric tiling window managers (Hyprland / Omarchy), Mixarchy supports full vim-style and standard keyboard navigation:
+
+| Key | Action |
+|---|---|
+| <kbd>Space</kbd> | Toggle Play / Pause |
+| <kbd>j</kbd> / <kbd>↓</kbd> | Navigate down in active list (Tracks or Queue) |
+| <kbd>k</kbd> / <kbd>↑</kbd> | Navigate up in active list (Tracks or Queue) |
+| <kbd>Enter</kbd> | Play highlighted track in active list |
+| <kbd>n</kbd> | Next track in queue |
+| <kbd>p</kbd> | Previous track in queue |
+| <kbd>→</kbd> | Seek forward (+5 seconds) |
+| <kbd>←</kbd> | Seek backward (-5 seconds) |
+| <kbd>/</kbd> | Focus instant search bar |
+| <kbd>Esc</kbd> | Clear search filter or return focus to list |
 
 ---
 
