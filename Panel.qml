@@ -2020,7 +2020,7 @@ Panel {
 
                   delegate: Item {
                     width: lyricsListView.width
-                    implicitHeight: Math.ceil(lyricLineText.implicitHeight * 1.22) + Style.space(12)
+                    implicitHeight: Math.ceil(lyricLineText.implicitHeight * 1.25) + Style.space(12)
 
                     readonly property bool isCurrentLine: {
                       if (!root.currentLyrics || !root.currentLyrics.synced) return false
@@ -2046,7 +2046,7 @@ Panel {
                       anchors.left: parent.left
                       anchors.leftMargin: Style.space(20)
                       anchors.verticalCenter: parent.verticalCenter
-                      width: Math.max(100, parent.width - Style.space(64))
+                      width: Math.max(100, Math.floor((parent.width - Style.space(48)) / 1.20))
                       text: modelData.text || "♪"
                       font.family: Style.font.family
                       font.pixelSize: Style.space(16)
@@ -2056,7 +2056,7 @@ Panel {
                       scale: isCurrentLine ? 1.20 : 1.0
                       transformOrigin: Item.Left
                       horizontalAlignment: Text.AlignLeft
-                      wrapMode: Text.WordWrap
+                      wrapMode: Text.Wrap
 
                       Behavior on scale { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
                       Behavior on opacity { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
