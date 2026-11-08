@@ -652,8 +652,17 @@ Panel {
         try {
           var res = JSON.parse(text)
           if (res.ok && res.tracks) {
+            var hadItems = root.playbackQueue && root.playbackQueue.length > 0
+            var prevY = (typeof queueListView !== "undefined" && queueListView) ? queueListView.contentY : -1
             root.playbackQueue = res.tracks
             root.queueIndex = res.queue_index
+            if (typeof queueListView !== "undefined" && queueListView) {
+              if (hadItems && prevY >= 0) {
+                queueListView.contentY = Math.min(prevY, Math.max(0, queueListView.contentHeight - queueListView.height))
+              } else if (!hadItems && root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                Qt.callLater(function() { queueListView.scrollToCurrent(false) })
+              }
+            }
           }
         } catch (e) { }
       }
@@ -756,41 +765,19 @@ Panel {
           root.bootstrapDone()
           return
         }
-        root.runBootstrap("check-target-hash", [root.tool("sha256sum"), "-b",
-          root.pluginDir + "/target/release/mixarchy-ctl"])
-      }
-      else if (step === "check-target-hash") {
-        var targetHash = (root.bootstrapHashOut || "").trim().split(" ")[0]
-        if (exitCode === 0 && targetHash === root.expectedSha256) {
-          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
-          root.bootstrapDone()
-          return
-        }
-        if (exitCode === 0 && root.devBuildEnabled) {
-          // Developer mode opt-in: accept the local build without the release
-          // pin, but only with a permanent visible warning (devMode).
-          root.devMode = true
-          root.ctlPath = root.pluginDir + "/target/release/mixarchy-ctl"
-          root.bootstrapDone()
-          return
-        }
-        // Stale, replaced, or unpinned local build: remove it and re-acquire
-        // the verified release (fail closed on mismatch).
-        root.runBootstrap("rm-target", [root.tool("rm"), "-f",
-          root.pluginDir + "/target/release/mixarchy-ctl"])
-      }
-      else if (step === "rm-target") {
-        root.runBootstrap("rm-bin", [root.tool("rm"), "-f", root.ctlPath])
+        root.bootError = "Mixarchy: binary verification failed (actual: " + actual + ", expected: " + root.expectedSha256 + ")"
+        console.warn("Mixarchy: binary check failed — stopping to avoid reload loop")
+        return
       }
       else if (step === "rm-bin") {
         root.runBootstrap("mkdir", [root.tool("mkdir"), "-p", root.pluginDir + "/bin"])
       }
       else if (step === "mkdir") {
         if (exitCode === 0) {
-          // Exclusive unpredictable temp path inside bin/: mktemp creates it
-          // with O_EXCL, so a pre-existing symlink at that name is impossible.
+          // Exclusive unpredictable temp path outside pluginDir so
+          // Quickshell's file watcher does not reload on intermediate files.
           root.runBootstrap("mktemp", [root.tool("mktemp"),
-            root.pluginDir + "/bin/mixarchy-ctl.XXXXXX"])
+            (root.runtimeDir !== "" ? root.runtimeDir : "/tmp") + "/mixarchy-ctl.XXXXXX"])
         } else {
           root.downloadError()
         }
@@ -2214,8 +2201,6 @@ Panel {
                       }
                     }
 
-                    onModelChanged: Qt.callLater(function() { scrollToCurrent(false) })
-
                     Connections {
                       target: root
                       function onQueueIndexChanged() {
@@ -2228,34 +2213,41 @@ Panel {
                           Qt.callLater(function() { queueListView.scrollToCurrent(false) })
                         }
                       }
+                      function onCurrentScreenChanged() {
+                        if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+                          Qt.callLater(function() { queueListView.scrollToCurrent(false) })
+                        }
+                      }
                     }
 
                     delegate: BorderSurface {
+                      id: rowSurface
                       required property var modelData
                       required property int index
                       readonly property bool isCurrentInQueue: index === root.queueIndex
                       readonly property bool isPastInQueue: root.queueIndex >= 0 && index < root.queueIndex
                       readonly property bool isUpcoming: root.queueIndex >= 0 && index > root.queueIndex
 
+                      HoverHandler {
+                        id: rowHover
+                      }
+
                       Component.onCompleted: {
                         root.requestCover(modelData.id, true)
-                        if (isCurrentInQueue) {
-                          queueListView.positionViewAtIndex(index, ListView.Center)
-                        }
                       }
 
                       width: queueListView.width
                       implicitHeight: Style.space(38)
                       radius: Style.cornerRadius
-                      opacity: isPastInQueue ? (qArea.containsMouse ? 0.8 : 0.45) : 1.0
+                      opacity: isPastInQueue ? (rowHover.hovered ? 0.8 : 0.45) : 1.0
                       Behavior on opacity { NumberAnimation { duration: 150 } }
 
-                      borderSpec: isCurrentInQueue || qArea.containsMouse || queueListView.currentIndex === index
+                      borderSpec: isCurrentInQueue || rowHover.hovered || queueListView.currentIndex === index
                         ? Border.controlSpec((isCurrentInQueue || queueListView.currentIndex === index) ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
                         : Border.none()
                       color: (isCurrentInQueue || queueListView.currentIndex === index)
                         ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
-                        : (qArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
+                        : (rowHover.hovered ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
 
                       RowLayout {
                         anchors.fill: parent
@@ -2321,68 +2313,69 @@ Panel {
                           }
                         }
 
-                        Item {
-                          Layout.preferredWidth: Style.space(36)
-                          Layout.fillHeight: true
-
-                          Text {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            visible: !removeHoverArea.containsMouse && (!qArea.containsMouse || !isUpcoming)
-                            text: modelData.duration_str || "0:00"
-                            font.family: Style.font.family
-                            font.pixelSize: Style.font.caption
-                            color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
-                          }
-
-                          Rectangle {
-                            id: removeBtn
-                            visible: isUpcoming && qArea.containsMouse
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: Style.space(22)
-                            height: Style.space(22)
-                            radius: Style.cornerRadius
-                            color: removeHoverArea.containsMouse ? Commons.Color.alert : "transparent"
-                            opacity: removeHoverArea.containsMouse ? 0.9 : 0.6
-                            z: 2
-
-                            Behavior on color { ColorAnimation { duration: 150 } }
-
-                            Text {
-                              anchors.centerIn: parent
-                              text: "✕"
-                              font.family: Style.font.family
-                              font.pixelSize: Style.font.caption
-                              font.weight: Font.Bold
-                              color: removeHoverArea.containsMouse ? Commons.Color.background : Commons.Color.foreground
-                            }
-
-                            MouseArea {
-                              id: removeHoverArea
-                              anchors.fill: parent
-                              hoverEnabled: true
-                              cursorShape: Qt.PointingHandCursor
-                              z: 10
-                              onClicked: {
-                                root.runCtl(["queue-remove", String(index)], function() {
-                                  root.fetchQueue()
-                                })
-                              }
-                            }
-                          }
+                        Text {
+                          visible: !isUpcoming || !rowHover.hovered
+                          text: modelData.duration_str || "0:00"
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
+                          Layout.alignment: Qt.AlignVCenter
                         }
                       }
 
                       MouseArea {
                         id: qArea
                         anchors.fill: parent
-                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                           root.runCtl(["play-index", String(index)], function() {
                             root.fetchQueue()
                           })
+                        }
+                      }
+
+                      BorderSurface {
+                        id: removeBtn
+                        visible: isUpcoming && rowHover.hovered
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(24)
+                        height: Style.space(24)
+                        radius: Style.cornerRadius
+                        z: 10
+                        borderSpec: removeHover.hovered
+                          ? Border.controlSpec("hover-cursor", root.foreground, Commons.Color.accent)
+                          : Border.none()
+                        color: removeHover.hovered
+                          ? Style.hoverFillFor(root.foreground, Commons.Color.accent)
+                          : "transparent"
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: "✕"
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          font.weight: Font.Bold
+                          color: removeHover.hovered ? Commons.Color.accent : Qt.darker(Commons.Color.foreground, 1.4)
+                        }
+
+                        HoverHandler {
+                          id: removeHover
+                          cursorShape: Qt.PointingHandCursor
+                        }
+
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: function(mouse) {
+                            mouse.accepted = true
+                            root.runCtl(["queue-remove", String(index)], function() {
+                              root.fetchQueue()
+                            })
+                          }
                         }
                       }
                     }
