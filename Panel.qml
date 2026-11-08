@@ -23,7 +23,7 @@ Panel {
     function setSubTab(tab: string): void {
       root.open()
       root.currentScreen = "nowplaying"
-      root.nowPlayingSubTab = tab
+      root.nowPlayingSubTab = (tab === "cover" ? "" : tab)
       root.syncNowPlayingTab()
     }
   }
@@ -115,7 +115,7 @@ Panel {
 
   // State
   property string currentScreen: "tracks" // "tracks" | "playlists" | "nowplaying"
-  property string nowPlayingSubTab: "cover" // "cover" | "lyrics" | "queue"
+  property string nowPlayingSubTab: "" // "" (default: cover) | "lyrics" | "queue"
 
   // Lyrics state
   property var currentLyrics: null
@@ -1678,23 +1678,13 @@ Panel {
               Item { Layout.fillWidth: true }
 
               Button {
-                iconText: "󰋩"
-                text: "Cover"
-                bordered: true
-                selected: root.nowPlayingSubTab === "cover"
-                onClicked: root.nowPlayingSubTab = "cover"
-              }
-
-              Button {
                 iconText: "󰨖"
                 text: "Lyrics"
                 bordered: true
                 selected: root.nowPlayingSubTab === "lyrics"
                 onClicked: {
-                  root.nowPlayingSubTab = "lyrics"
-                  if (root.currentTrack && root.currentTrack.id) {
-                    root.fetchLyrics(root.currentTrack.id)
-                  }
+                  root.nowPlayingSubTab = root.nowPlayingSubTab === "lyrics" ? "" : "lyrics"
+                  root.syncNowPlayingTab()
                 }
               }
 
@@ -1704,8 +1694,8 @@ Panel {
                 bordered: true
                 selected: root.nowPlayingSubTab === "queue"
                 onClicked: {
-                  root.nowPlayingSubTab = "queue"
-                  root.fetchQueue()
+                  root.nowPlayingSubTab = root.nowPlayingSubTab === "queue" ? "" : "queue"
+                  root.syncNowPlayingTab()
                 }
               }
             }
@@ -1716,7 +1706,7 @@ Panel {
             StackLayout {
               Layout.fillWidth: true
               Layout.fillHeight: true
-              currentIndex: root.nowPlayingSubTab === "cover" ? 0 : (root.nowPlayingSubTab === "lyrics" ? 1 : 2)
+              currentIndex: root.nowPlayingSubTab === "lyrics" ? 1 : (root.nowPlayingSubTab === "queue" ? 2 : 0)
 
               // 1. Big Cover Art
               ColumnLayout {
@@ -2241,7 +2231,7 @@ Panel {
 
                     Text {
                       text: root.currentTrack
-                        ? (root.currentTrack.artist + " · 󰘸 Expand")
+                        ? root.currentTrack.artist
                         : (root.trackCount + " tracks available")
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
