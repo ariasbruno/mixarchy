@@ -1019,6 +1019,33 @@ Panel {
     runCtl(["seek", String(sec)])
   }
 
+  function playTrackAtIndex(idx) {
+    if (idx < 0 || idx >= root.filteredTracks.length) return
+    var track = root.filteredTracks[idx]
+    var source = root.activePlaylistName !== "" ? root.activePlaylistName : "Tracks"
+    var isSearching = root.searchFilter.trim() !== ""
+    var shouldLock = isSearching && root.lockSearchQueue
+
+    if (shouldLock) {
+      var list = root.filteredTracks
+      var paths = list.map(function(t) { return t.path })
+      var queueSource = "Search: " + root.searchFilter.trim()
+      root.runCtl(["play-queue", queueSource, String(idx)].concat(paths))
+    } else {
+      var fullList = root.activeFullTracks
+      var clickedPath = track.path
+      var fullIndex = -1
+      for (var i = 0; i < fullList.length; i++) {
+        if (fullList[i].path === clickedPath) {
+          fullIndex = i
+          break
+        }
+      }
+      var paths = fullList.map(function(t) { return t.path })
+      root.runCtl(["play-queue", source, String(fullIndex >= 0 ? fullIndex : 0)].concat(paths))
+    }
+  }
+
   function fetchLyrics(id) {
     if (!id || !root.bootstrapped) return
     if (root.lastLyricsTrackId === id && root.currentLyrics) return
@@ -1255,8 +1282,94 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: searchField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+
+      Keys.onPressed: function(event) {
+        if (blocked) return
+
+        if (event.key === Qt.Key_Space) {
+          root.togglePlay()
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Left) {
+          root.seekTo(Math.max(0, root.timePos - 5))
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Right) {
+          root.seekTo(root.timePos + 5)
+          event.accepted = true
+          return
+        }
+        if (event.text === "n" || event.text === "N") {
+          root.nextTrack()
+          event.accepted = true
+          return
+        }
+        if (event.text === "p" || event.text === "P") {
+          root.prevTrack()
+          event.accepted = true
+          return
+        }
+        if (event.text === "/") {
+          root.currentScreen = "tracks"
+          searchField.forceActiveFocus()
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+          if (root.currentScreen === "tracks") {
+            root.playTrackAtIndex(tracksListView.currentIndex)
+            event.accepted = true
+            return
+          } else if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+            if (queueListView.currentIndex >= 0 && queueListView.currentIndex < root.playbackQueue.length) {
+              root.runCtl(["play-index", String(queueListView.currentIndex)], function() {
+                root.fetchQueue()
+              })
+              event.accepted = true
+              return
+            }
+          }
+        }
+        if (event.key === Qt.Key_Down || event.text === "j") {
+          if (root.currentScreen === "tracks") {
+            if (tracksListView.currentIndex + 1 < tracksListView.count) {
+              tracksListView.currentIndex++
+              tracksListView.positionViewAtIndex(tracksListView.currentIndex, ListView.Contain)
+            }
+            event.accepted = true
+            return
+          } else if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+            if (queueListView.currentIndex + 1 < queueListView.count) {
+              queueListView.currentIndex++
+              queueListView.positionViewAtIndex(queueListView.currentIndex, ListView.Contain)
+            }
+            event.accepted = true
+            return
+          }
+        }
+        if (event.key === Qt.Key_Up || event.text === "k") {
+          if (root.currentScreen === "tracks") {
+            if (tracksListView.currentIndex > 0) {
+              tracksListView.currentIndex--
+              tracksListView.positionViewAtIndex(tracksListView.currentIndex, ListView.Contain)
+            }
+            event.accepted = true
+            return
+          } else if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
+            if (queueListView.currentIndex > 0) {
+              queueListView.currentIndex--
+              queueListView.positionViewAtIndex(queueListView.currentIndex, ListView.Contain)
+            }
+            event.accepted = true
+            return
+          }
+        }
+      }
 
       ColumnLayout {
         id: mainColumn
@@ -1369,9 +1482,33 @@ Panel {
               TextField {
                 id: searchField
                 Layout.fillWidth: true
-                placeholderText: "Search tracks, artists, albums..."
+                placeholderText: "Search tracks, artists, albums... (/)"
                 text: root.searchFilter
                 onTextChanged: root.searchFilter = text
+                Keys.onEscapePressed: function(event) {
+                  if (text !== "") {
+                    text = ""
+                    event.accepted = true
+                  } else {
+                    focus = false
+                    keyCatcher.forceActiveFocus()
+                    event.accepted = true
+                  }
+                }
+                Keys.onReturnPressed: function(event) {
+                  if (root.filteredTracks.length > 0) {
+                    tracksListView.currentIndex = 0
+                    root.playTrackAtIndex(0)
+                    event.accepted = true
+                  }
+                }
+                Keys.onDownPressed: function(event) {
+                  if (tracksListView.count > 0) {
+                    tracksListView.currentIndex = 0
+                    keyCatcher.forceActiveFocus()
+                    event.accepted = true
+                  }
+                }
               }
 
               Button {
@@ -1465,10 +1602,10 @@ Panel {
                 width: tracksListView.width
                 implicitHeight: Style.space(38)
                 radius: Style.cornerRadius
-                borderSpec: isCurrent || trackArea.containsMouse
-                  ? Border.controlSpec(isCurrent ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
+                borderSpec: isCurrent || trackArea.containsMouse || tracksListView.currentIndex === index
+                  ? Border.controlSpec((isCurrent || tracksListView.currentIndex === index) ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
                   : Border.none()
-                color: isCurrent
+                color: (isCurrent || tracksListView.currentIndex === index)
                   ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
                   : (trackArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
 
@@ -1553,28 +1690,8 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    var source = root.activePlaylistName !== "" ? root.activePlaylistName : "Tracks"
-                    var isSearching = root.searchFilter.trim() !== ""
-                    var shouldLock = isSearching && root.lockSearchQueue
-
-                    if (shouldLock) {
-                      var list = root.filteredTracks
-                      var paths = list.map(function(t) { return t.path })
-                      var queueSource = "Search: " + root.searchFilter.trim()
-                      root.runCtl(["play-queue", queueSource, String(index)].concat(paths))
-                    } else {
-                      var fullList = root.activeFullTracks
-                      var clickedPath = modelData.path
-                      var fullIndex = -1
-                      for (var i = 0; i < fullList.length; i++) {
-                        if (fullList[i].path === clickedPath) {
-                          fullIndex = i
-                          break
-                        }
-                      }
-                      var paths = fullList.map(function(t) { return t.path })
-                      root.runCtl(["play-queue", source, String(fullIndex >= 0 ? fullIndex : 0)].concat(paths))
-                    }
+                    tracksListView.currentIndex = index
+                    root.playTrackAtIndex(index)
                   }
                 }
               }
@@ -2133,10 +2250,10 @@ Panel {
                       opacity: isPastInQueue ? (qArea.containsMouse ? 0.8 : 0.45) : 1.0
                       Behavior on opacity { NumberAnimation { duration: 150 } }
 
-                      borderSpec: isCurrentInQueue || qArea.containsMouse
-                        ? Border.controlSpec(isCurrentInQueue ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
+                      borderSpec: isCurrentInQueue || qArea.containsMouse || queueListView.currentIndex === index
+                        ? Border.controlSpec((isCurrentInQueue || queueListView.currentIndex === index) ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
                         : Border.none()
-                      color: isCurrentInQueue
+                      color: (isCurrentInQueue || queueListView.currentIndex === index)
                         ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
                         : (qArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
 
