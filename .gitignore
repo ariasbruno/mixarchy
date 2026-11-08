@@ -10,3 +10,5 @@ session.json
 login.url
 ui_state.json
 .codegraph/
+# Local AI runtime state
+.atl/

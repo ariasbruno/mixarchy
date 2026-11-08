@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Panel {
@@ -90,7 +91,7 @@ Panel {
   property var resolvedTools: ({})
   property var pendingTool: null
 
-  readonly property color foreground: bar ? bar.barForeground : Color.foreground
+  readonly property color foreground: bar ? bar.barForeground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   visible: true
@@ -1135,8 +1136,8 @@ Panel {
           visible: root.devMode || root.bootError !== "" || root.isBuilding
           radius: Style.cornerRadius
           color: root.bootError !== ""
-            ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.18)
-            : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18)
+            : Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
 
           Text {
             id: statusBannerText
@@ -1149,7 +1150,7 @@ Panel {
             wrapMode: Text.WordWrap
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
-            color: root.bootError !== "" ? Color.urgent : Color.foreground
+            color: root.bootError !== "" ? Commons.Color.urgent : Commons.Color.foreground
             text: root.bootError !== ""
               ? root.bootError
               : (root.isBuilding
@@ -1287,7 +1288,7 @@ Panel {
                 text: root.filteredTracks.length + " tracks" + ((root.searchFilter.trim() !== "" && root.lockSearchQueue) ? " · 󰌾 Locked" : "")
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
-                color: Qt.darker(Color.foreground, 1.4)
+                color: Qt.darker(Commons.Color.foreground, 1.4)
               }
             }
 
@@ -1315,11 +1316,11 @@ Panel {
                 implicitHeight: Style.space(38)
                 radius: Style.cornerRadius
                 borderSpec: isCurrent || trackArea.containsMouse
-                  ? Border.controlSpec(isCurrent ? "focus" : "hover-cursor", root.foreground, Color.accent)
+                  ? Border.controlSpec(isCurrent ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
                   : Border.none()
                 color: isCurrent
-                  ? Style.selectedFillFor(root.foreground, Color.accent)
-                  : (trackArea.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent")
+                  ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
+                  : (trackArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
 
                 RowLayout {
                   anchors.fill: parent
@@ -1336,14 +1337,14 @@ Panel {
                     Layout.preferredHeight: Style.space(24)
                     Layout.alignment: Qt.AlignVCenter
                     radius: Style.cornerRadius
-                    color: Style.normalFillFor(root.foreground, Color.accent)
+                    color: Style.normalFillFor(root.foreground, Commons.Color.accent)
 
                     Text {
                       anchors.centerIn: parent
                       text: "󰎆"
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: Qt.darker(Color.foreground, 1.4)
+                      color: Qt.darker(Commons.Color.foreground, 1.4)
                     }
 
                     Image {
@@ -1363,7 +1364,7 @@ Panel {
                     text: root.isPlaying ? "" : "󰏤"
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
-                    color: Color.accent
+                    color: Commons.Color.accent
                   }
 
                   ColumnLayout {
@@ -1374,7 +1375,7 @@ Panel {
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
                       font.weight: isCurrent ? Font.Bold : Font.Normal
-                      color: isCurrent ? Color.accent : Color.foreground
+                      color: isCurrent ? Commons.Color.accent : Commons.Color.foreground
                       elide: Text.ElideRight
                       Layout.fillWidth: true
                     }
@@ -1382,7 +1383,7 @@ Panel {
                       text: (modelData.artist || "Unknown") + (modelData.album ? (" · " + modelData.album) : "")
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: Qt.darker(Color.foreground, 1.4)
+                      color: Qt.darker(Commons.Color.foreground, 1.4)
                       elide: Text.ElideRight
                       Layout.fillWidth: true
                     }
@@ -1392,7 +1393,7 @@ Panel {
                     text: modelData.duration_str || "0:00"
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
-                    color: Qt.darker(Color.foreground, 1.4)
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
                   }
                 }
 
@@ -1451,8 +1452,8 @@ Panel {
                 width: plListView.width
                 implicitHeight: Style.space(42)
                 radius: Style.cornerRadius
-                borderSpec: Border.controlSpec(plMouseArea.containsMouse ? "hover-cursor" : "normal", root.foreground, Color.accent)
-                color: plMouseArea.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+                borderSpec: Border.controlSpec(plMouseArea.containsMouse ? "hover-cursor" : "normal", root.foreground, Commons.Color.accent)
+                color: plMouseArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent"
 
                 RowLayout {
                   anchors.fill: parent
@@ -1464,7 +1465,7 @@ Panel {
                     text: ""
                     font.family: Style.font.family
                     font.pixelSize: Style.font.body
-                    color: Color.accent
+                    color: Commons.Color.accent
                   }
 
                   ColumnLayout {
@@ -1474,7 +1475,7 @@ Panel {
                       text: modelData.name
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
-                      color: Color.foreground
+                      color: Commons.Color.foreground
                       elide: Text.ElideRight
                       Layout.fillWidth: true
                     }
@@ -1482,7 +1483,7 @@ Panel {
                       text: modelData.track_count + " tracks"
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: Qt.darker(Color.foreground, 1.4)
+                      color: Qt.darker(Commons.Color.foreground, 1.4)
                     }
                   }
 
@@ -1490,7 +1491,7 @@ Panel {
                     text: "󰁔"
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
-                    color: Qt.darker(Color.foreground, 1.4)
+                    color: Qt.darker(Commons.Color.foreground, 1.4)
                   }
                 }
 
@@ -1517,8 +1518,8 @@ Panel {
           Layout.fillWidth: true
           implicitHeight: Style.space(72)
           radius: Style.cornerRadius
-          borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
-          color: Style.normalFillFor(Color.foreground, Color.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
+          color: Style.normalFillFor(Commons.Color.foreground, Commons.Color.accent)
 
           ColumnLayout {
             anchors.fill: parent
@@ -1543,14 +1544,14 @@ Panel {
                 Layout.preferredHeight: Style.space(36)
                 Layout.alignment: Qt.AlignVCenter
                 radius: Style.cornerRadius
-                color: Style.normalFillFor(root.foreground, Color.accent)
+                color: Style.normalFillFor(root.foreground, Commons.Color.accent)
 
                 Text {
                   anchors.centerIn: parent
                   text: "󰎆"
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
-                  color: Qt.darker(Color.foreground, 1.4)
+                  color: Qt.darker(Commons.Color.foreground, 1.4)
                 }
 
                 Image {
@@ -1568,7 +1569,7 @@ Panel {
                     radius: Style.cornerRadius
                     color: "transparent"
                     border.width: 1
-                    border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.15)
+                    border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.15)
                   }
                 }
               }
@@ -1582,7 +1583,7 @@ Panel {
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
                   font.weight: Font.Bold
-                  color: Color.foreground
+                  color: Commons.Color.foreground
                   elide: Text.ElideRight
                   Layout.fillWidth: true
                 }
@@ -1593,7 +1594,7 @@ Panel {
                     : (root.trackCount + " tracks available")
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
-                  color: Qt.darker(Color.foreground, 1.4)
+                  color: Qt.darker(Commons.Color.foreground, 1.4)
                   elide: Text.ElideRight
                   Layout.fillWidth: true
                 }
@@ -1634,7 +1635,7 @@ Panel {
                   : "0:00"
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
-                color: Qt.darker(Color.foreground, 1.4)
+                color: Qt.darker(Commons.Color.foreground, 1.4)
                 Layout.minimumWidth: Style.space(28)
                 horizontalAlignment: Text.AlignRight
               }
@@ -1657,7 +1658,7 @@ Panel {
                   width: parent.width
                   height: (progressMouse.containsMouse || progressBar.isDragging) ? Style.space(4) : Style.space(2)
                   radius: height / 2
-                  color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.18)
+                  color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.18)
                   Behavior on height { NumberAnimation { duration: 100 } }
 
                   // Filled progress
@@ -1667,7 +1668,7 @@ Panel {
                     anchors.bottom: parent.bottom
                     width: parent.width * progressBar.currentRatio
                     radius: parent.radius
-                    color: Color.accent
+                    color: Commons.Color.accent
                   }
                 }
 
@@ -1677,9 +1678,9 @@ Panel {
                   width: Style.space(10)
                   height: Style.space(10)
                   radius: width / 2
-                  color: Color.accent
+                  color: Commons.Color.accent
                   border.width: 1.5
-                  border.color: Color.foreground
+                  border.color: Commons.Color.foreground
                   x: Math.max(0, Math.min(progressBar.width - width, (progressBar.width * progressBar.currentRatio) - (width / 2)))
                   anchors.verticalCenter: parent.verticalCenter
                   visible: root.duration > 0
@@ -1733,7 +1734,7 @@ Panel {
                 text: root.currentTrack ? root.durationStr : "0:00"
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
-                color: Qt.darker(Color.foreground, 1.4)
+                color: Qt.darker(Commons.Color.foreground, 1.4)
                 Layout.minimumWidth: Style.space(28)
               }
             }
