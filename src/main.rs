@@ -3,6 +3,7 @@ mod engine;
 mod library;
 mod lyrics;
 mod models;
+mod playlist;
 mod trusted;
 
 use std::path::PathBuf;
@@ -11,7 +12,7 @@ use engine::{
     get_queue, get_status, next_track, play_queue_index, play_track, prev_track,
     remove_queue_index, seek_playback, stop_playback, toggle_playback, toggle_shuffle,
 };
-use library::{default_music_dir, load_library, load_state, scan_library};
+use library::{default_music_dir, lib_cache_file, load_library_from, load_state, scan_library};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -19,7 +20,7 @@ fn main() {
         println!(
             "{}",
             serde_json::json!({
-                "error": "Usage: mixarchy-ctl [scan|library|status|queue|queue-remove|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics]"
+                "error": "Usage: mixarchy-ctl [scan|library|status|queue|queue-remove|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics|playlist-create|playlist-add|playlist-remove|playlist-rename|playlist-delete]"
             })
         );
         return;
@@ -42,8 +43,10 @@ fn main() {
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }
-        "library" => serde_json::to_value(load_library())
-            .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
+        "library" => {
+            serde_json::to_value(load_library_from(&lib_cache_file(), &default_music_dir()))
+                .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }))
+        }
         "status" => get_status(),
         "queue" => get_queue(),
         "queue-remove" => {
@@ -150,6 +153,16 @@ fn main() {
                 None => serde_json::json!({ "ok": false, "error": "Missing track id" }),
             }
         }
+        "playlist-create" | "playlist-add" | "playlist-remove" | "playlist-rename"
+        | "playlist-delete" => playlist::execute_playlist_command(
+            cmd,
+            &args[2..],
+            &default_music_dir(),
+            &lib_cache_file(),
+        )
+        .unwrap_or_else(
+            || serde_json::json!({ "ok": false, "error": format!("Unknown command: {}", cmd) }),
+        ),
         _ => serde_json::json!({ "ok": false, "error": format!("Unknown command: {}", cmd) }),
     };
 

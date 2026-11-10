@@ -5,6 +5,12 @@ All notable changes to Mixarchy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Persistent Playlist Management**: Add backend and CLI operations to create empty M3U playlists, add or remove existing tracks, rename playlists, and delete playlists.
+- **Safe Playlist Mutations**: Validate display names and stored paths, reject collisions without overwriting files, preserve M3U comments and ordering, write changes atomically, and refresh the derived library index after accepted mutations.
+
 ## [1.3.0] - 2026-11-08
 
 ### Added

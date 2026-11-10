@@ -28,6 +28,7 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 - **Deterministic Fisher-Yates Shuffle**: True randomized queue permutations that preserve reliable, bidirectional navigation (`Next` / `Prev`) without erratic jumps or duplicate repeats.
 - **Multi-Criteria Sorting**: Quick sorting with ascending/descending toggle across **Artist**, **Album**, **Title**, **Duration**, or **Recent** (file modification time).
 - **Automatic Playlists**: Seamlessly detects and plays `.m3u` / `.m3u8` playlists nested in your music directory with relative path resolution.
+- **Persistent Playlist Editing**: Creates, renames, and deletes M3U playlists, adds or removes tracks while preserving comments and ordering, and refreshes the library index after every accepted change. Playlist identity is the canonical stored file path, not the display name.
 - **Rich Tag Extraction & Clean Collaborations**: Sub-second parallel metadata indexing via [Lofty](https://github.com/Serial-ATA/lofty-rs) with standardized collaboration formatting (`Artist ft. Collaborator`).
 
 ### UI & Desktop Integration
@@ -172,6 +173,13 @@ mixarchy-ctl status                                # Get current playback status
 mixarchy-ctl library                               # Dump indexed library tracks and playlists
 mixarchy-ctl scan [dir]                            # Rescan music directory (defaults to ~/Music)
 
+# Playlist Management
+mixarchy-ctl playlist-create <name>                # Create an empty .m3u playlist from a display name
+mixarchy-ctl playlist-add <playlist> <track>       # Add an existing track to a playlist
+mixarchy-ctl playlist-remove <playlist> <track>    # Remove a track from a playlist
+mixarchy-ctl playlist-rename <playlist> <name>     # Rename a playlist without overwriting another file
+mixarchy-ctl playlist-delete <playlist>            # Delete a playlist
+
 # Queue & Lyrics
 mixarchy-ctl queue                                 # Dump active playback queue and current track index
 mixarchy-ctl queue-remove <index>                  # Remove specific upcoming track from active queue
@@ -182,6 +190,8 @@ mixarchy-ctl lyrics <id>                           # Fetch synchronized/plain ly
 mixarchy-ctl cover <id>                            # Extract full-res cover as base64 data URI
 mixarchy-ctl cover --thumb <id>                    # Get cached 96x96 thumbnail path for track list
 ```
+
+Playlist mutations return `{"ok":true,...}` with the resulting canonical playlist path and playlist data. Rejected mutations return `{"ok":false,"error":"..."}` and leave playlist files unchanged. Pass the stored playlist path—not its display name—when adding, removing, renaming, or deleting a playlist.
 
 ---
 

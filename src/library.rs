@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -35,20 +35,85 @@ pub fn state_file() -> PathBuf {
     cache_dir().join("state.json")
 }
 
-// Write a file atomically: write to a unique temp file in the same directory,
-// fsync it, then rename over the destination (atomic on the same filesystem),
-// so a crash or concurrent reader never observes a truncated JSON file.
-fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
-    let tmp_name = format!(
-        "{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("out"),
-        std::process::id()
-    );
-    let tmp_path = path.with_file_name(tmp_name);
-    let mut file = File::create(&tmp_path)?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&tmp_path, path)?;
+const MAX_STAGING_ATTEMPTS: usize = 128;
+
+fn staging_candidate(destination: &Path, token: &str) -> PathBuf {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("output");
+    parent.join(format!(".{file_name}.{token}.tmp"))
+}
+
+fn create_staging_file_with_candidates<F>(
+    destination: &Path,
+    mut next_candidate: F,
+) -> io::Result<(PathBuf, File)>
+where
+    F: FnMut() -> io::Result<PathBuf>,
+{
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let candidate = next_candidate()?;
+        if candidate.parent() != destination.parent() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staging file must be in the destination directory",
+            ));
+        }
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate an unused staging file name",
+    ))
+}
+
+pub(crate) fn create_staging_file(destination: &Path) -> io::Result<(PathBuf, File)> {
+    create_staging_file_with_candidates(destination, || {
+        let token = format!("{:032x}", rand::random::<u128>());
+        Ok(staging_candidate(destination, &token))
+    })
+}
+
+fn cleanup_staging_file(path: &Path, error: io::Error) -> io::Error {
+    match fs::remove_file(path) {
+        Ok(()) => error,
+        Err(cleanup_err) if cleanup_err.kind() == io::ErrorKind::NotFound => error,
+        Err(cleanup_err) => io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; additionally failed to clean staging file {}: {cleanup_err}",
+                path.display()
+            ),
+        ),
+    }
+}
+
+// Write a file atomically: write to an exclusively-created staging file in the
+// same directory, fsync it, then rename over the destination (atomic on the
+// same filesystem), so a crash or concurrent reader never observes a truncated
+// JSON file and an occupied staging name can never redirect the write.
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
+    let (tmp_path, mut file) = create_staging_file(path)?;
+    if let Err(err) = file.write_all(contents.as_bytes()) {
+        return Err(cleanup_staging_file(&tmp_path, err));
+    }
+    if let Err(err) = file.sync_all() {
+        return Err(cleanup_staging_file(&tmp_path, err));
+    }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        return Err(cleanup_staging_file(&tmp_path, err));
+    }
     Ok(())
 }
 
@@ -218,7 +283,49 @@ pub fn parse_audio_metadata(file_path: &Path) -> (String, String, String, f64, u
     (title, artist, album, duration, track_num)
 }
 
-pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
+pub fn read_playlist(path: &Path) -> io::Result<PlaylistItem> {
+    let canonical_path = fs::canonicalize(path)?;
+    let file = File::open(&canonical_path)?;
+    let reader = BufReader::new(file);
+    let mut resolved_paths = Vec::new();
+
+    for line in reader.lines().map_while(|result| match result {
+        Ok(line) => Some(line),
+        Err(err) => {
+            eprintln!(
+                "mixarchy: {}: failed to read playlist: {err}",
+                canonical_path.display()
+            );
+            None
+        }
+    }) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(parent) = canonical_path.parent() {
+            let candidate = parent.join(trimmed);
+            if candidate.exists() {
+                resolved_paths.push(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    let stem = canonical_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Playlist");
+    let name = stem.replace("_playlist", "").trim().to_string();
+
+    Ok(PlaylistItem {
+        name,
+        path: canonical_path.to_string_lossy().to_string(),
+        track_count: resolved_paths.len(),
+        track_paths: resolved_paths,
+    })
+}
+
+pub fn scan_library_to(music_dir: &Path, cache_path: &Path) -> Result<LibraryData, Box<dyn Error>> {
     let mut tracks = Vec::new();
     let mut playlists = Vec::new();
 
@@ -279,42 +386,14 @@ pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
                 mtime,
             });
         } else if ext == "m3u8" || ext == "m3u" {
-            if let Ok(file) = File::open(path) {
-                let reader = BufReader::new(file);
-                let mut resolved_paths = Vec::new();
-                for line in reader.lines().map_while(|r| match r {
-                    Ok(line) => Some(line),
-                    Err(err) => {
-                        // A corrupt playlist (truncated write, weird encoding)
-                        // stops the list but the error must not be silent.
-                        eprintln!("mixarchy: {}: failed to read playlist: {err}", path.display());
-                        None
-                    }
-                }) {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
-                        continue;
-                    }
-                    if let Some(parent) = path.parent() {
-                        let candidate = parent.join(trimmed);
-                        if candidate.exists() {
-                            resolved_paths.push(candidate.to_string_lossy().to_string());
-                        }
-                    }
+            match read_playlist(path) {
+                Ok(playlist) => playlists.push(playlist),
+                Err(err) => {
+                    eprintln!(
+                        "mixarchy: {}: failed to read playlist: {err}",
+                        path.display()
+                    );
                 }
-
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Playlist");
-                let name = stem.replace("_playlist", "").trim().to_string();
-
-                playlists.push(PlaylistItem {
-                    name,
-                    path: path.to_string_lossy().to_string(),
-                    track_count: resolved_paths.len(),
-                    track_paths: resolved_paths,
-                });
             }
         }
     }
@@ -329,24 +408,28 @@ pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
         playlists,
     };
 
-    let cache_path = lib_cache_file();
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let json_str = serde_json::to_string_pretty(&data)?;
-    atomic_write(&cache_path, &json_str)?;
+    atomic_write(cache_path, &json_str)?;
 
     Ok(data)
 }
 
-pub fn load_library() -> LibraryData {
-    let cache_path = lib_cache_file();
+pub fn scan_library(music_dir: &Path) -> Result<LibraryData, Box<dyn Error>> {
+    scan_library_to(music_dir, &lib_cache_file())
+}
+
+pub fn load_library_from(cache_path: &Path, music_dir: &Path) -> LibraryData {
     if cache_path.exists() {
-        if let Ok(content) = fs::read_to_string(&cache_path) {
+        if let Ok(content) = fs::read_to_string(cache_path) {
             if let Ok(data) = serde_json::from_str::<LibraryData>(&content) {
                 return data;
             }
         }
     }
-    let music_dir = default_music_dir();
-    scan_library(&music_dir).unwrap_or_else(|_| LibraryData {
+    scan_library_to(music_dir, cache_path).unwrap_or_else(|_| LibraryData {
         last_scan: 0,
         music_dir: music_dir.to_string_lossy().to_string(),
         track_count: 0,
@@ -354,6 +437,10 @@ pub fn load_library() -> LibraryData {
         tracks: vec![],
         playlists: vec![],
     })
+}
+
+pub fn load_library() -> LibraryData {
+    load_library_from(&lib_cache_file(), &default_music_dir())
 }
 
 pub fn load_state() -> PlayerState {
@@ -414,5 +501,54 @@ mod tests {
             Some("guest".to_string())
         );
         assert_eq!(extract_feat_from_title("No Collaboration"), None);
+    }
+
+    #[test]
+    fn staging_creation_retries_occupied_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let output = Command::new("mktemp")
+            .arg("-d")
+            .output()
+            .expect("mktemp -d should be available");
+        assert!(output.status.success());
+        let temp = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("valid temp path")
+                .trim()
+                .to_string(),
+        );
+        let music_dir = temp.join("Music");
+        fs::create_dir(&music_dir).unwrap();
+        let destination = music_dir.join("Set.m3u");
+        let victim = temp.join("victim.txt");
+        fs::write(&destination, "playlist").unwrap();
+        fs::write(&victim, "victim").unwrap();
+
+        let occupied = staging_candidate(&destination, "occupied");
+        let free = staging_candidate(&destination, "free");
+        symlink(&victim, &occupied).unwrap();
+
+        let mut attempts = 0;
+        let (staging_path, _file) = create_staging_file_with_candidates(&destination, || {
+            attempts += 1;
+            if attempts == 1 {
+                Ok(occupied.clone())
+            } else {
+                Ok(free.clone())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(staging_path, free);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "playlist");
+        assert!(fs::symlink_metadata(&occupied)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_file(&staging_path).unwrap();
+        fs::remove_dir_all(&temp).unwrap();
     }
 }
