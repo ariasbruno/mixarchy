@@ -61,6 +61,11 @@ fn sanitize_playlist_name(display_name: &str) -> Result<String, PlaylistError> {
             "Playlist name cannot contain control characters",
         ));
     }
+    if trimmed.starts_with('.') {
+        return Err(PlaylistError::new(
+            "Playlist name cannot start with a dot",
+        ));
+    }
 
     let mut sanitized: String = trimmed
         .chars()
@@ -647,6 +652,51 @@ mod tests {
         }
 
         assert_eq!(fs::read_dir(&music_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn rejects_dot_prefixed_playlist_names_without_creating_hidden_files() {
+        let (_temp, music_dir, cache_path) = isolated_paths();
+
+        for name in [".favorites", ".hidden", " .private "] {
+            let result = create_playlist(&music_dir, &cache_path, name);
+            assert!(result.is_err(), "name should be rejected: {name:?}");
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("cannot start with a dot"),
+                "error should explain the rule: {error}"
+            );
+        }
+
+        assert_eq!(fs::read_dir(&music_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn rejects_dot_prefixed_playlist_rename_without_changing_the_file() {
+        let (_temp, music_dir, cache_path) = isolated_paths();
+        let source = music_dir.join("Source.m3u");
+        write_file(&source, "source");
+
+        let result = rename_playlist(&music_dir, &cache_path, &source, ".hidden");
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("cannot start with a dot"),
+            "error should explain the rule: {error}"
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "source");
+        assert!(!music_dir.join(".hidden.m3u").exists());
+    }
+
+    #[test]
+    fn accepts_playlist_names_with_internal_dots() {
+        let (_temp, music_dir, cache_path) = isolated_paths();
+
+        let playlist = create_playlist(&music_dir, &cache_path, "Radio 101.5").unwrap();
+
+        assert_eq!(playlist.name, "Radio 101.5");
+        assert!(music_dir.join("Radio 101.5.m3u").exists());
     }
 
     #[test]

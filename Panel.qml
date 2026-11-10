@@ -1145,6 +1145,7 @@ Panel {
     if (/[\u0000-\u001f\u007f]/.test(name)) {
       return "Playlist name cannot contain control characters."
     }
+    if (name.startsWith(".")) return "Playlist name cannot start with a dot."
     if (root.utf8ByteLength(name) > 200) {
       return "Playlist name cannot exceed 200 bytes."
     }
@@ -3444,6 +3445,10 @@ Panel {
         Layout.fillWidth: true
         placeholderText: "Playlist name"
         Keys.onReturnPressed: function(event) {
+          root.submitPlaylistNameDialog()
+          event.accepted = true
+        }
+        Keys.onEnterPressed: function(event) {
           root.submitPlaylistNameDialog()
           event.accepted = true
         }
