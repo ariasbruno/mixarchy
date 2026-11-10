@@ -29,6 +29,7 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 - **Multi-Criteria Sorting**: Quick sorting with ascending/descending toggle across **Artist**, **Album**, **Title**, **Duration**, or **Recent** (file modification time).
 - **Automatic Playlists**: Seamlessly detects and plays `.m3u` / `.m3u8` playlists nested in your music directory with relative path resolution.
 - **Persistent Playlist Editing**: Creates, renames, and deletes M3U playlists, adds or removes tracks while preserving comments and ordering, and refreshes the library index after every accepted change. Playlist identity is the canonical stored file path, not the display name.
+- **Non-Interrupting Queue Actions**: Append a track to the persisted playback queue or insert it immediately after the current item without replacing the song that is playing. Queue ordering, shuffle state, and the mpv preload successor remain coherent after every accepted action.
 - **Rich Tag Extraction & Clean Collaborations**: Sub-second parallel metadata indexing via [Lofty](https://github.com/Serial-ATA/lofty-rs) with standardized collaboration formatting (`Artist ft. Collaborator`).
 
 ### UI & Desktop Integration
@@ -182,6 +183,8 @@ mixarchy-ctl playlist-delete <playlist>            # Delete a playlist
 
 # Queue & Lyrics
 mixarchy-ctl queue                                 # Dump active playback queue and current track index
+mixarchy-ctl queue-add <track_path>                # Append a track to the persisted playback queue
+mixarchy-ctl queue-play-next <track_path>          # Insert a track immediately after the current queue item
 mixarchy-ctl queue-remove <index>                  # Remove specific upcoming track from active queue
 mixarchy-ctl play-index <index>                    # Jump playback directly to track index in queue
 mixarchy-ctl lyrics <id>                           # Fetch synchronized/plain lyrics for track from .lrc or tags
@@ -192,6 +195,8 @@ mixarchy-ctl cover --thumb <id>                    # Get cached 96x96 thumbnail 
 ```
 
 Playlist mutations return `{"ok":true,...}` with the resulting canonical playlist path and playlist data. Rejected mutations return `{"ok":false,"error":"..."}` and leave playlist files unchanged. Pass the stored playlist path—not its display name—when adding, removing, renaming, or deleting a playlist.
+
+Queue mutations accept an existing file path. `queue-add` appends the track, while `queue-play-next` inserts it immediately after the current queue item (or at the front when there is no current item). Success responses include `queue_index`, `queue_total`, and `inserted_index`; rejected mutations report `{"ok":false,"error":"..."}` and leave the persisted queue unchanged. Neither command interrupts the current song.
 
 ---
 

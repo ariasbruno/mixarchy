@@ -10,7 +10,7 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 
 use crate::library::{load_library, load_state, save_state};
-use crate::models::{format_duration, LibraryData, TrackItem};
+use crate::models::{format_duration, LibraryData, PlayerState, QueueMutation, TrackItem};
 use crate::trusted::trusted_command;
 
 pub fn socket_path() -> PathBuf {
@@ -167,6 +167,18 @@ pub fn find_or_create_track(lib: &LibraryData, track_path: &str) -> TrackItem {
         })
 }
 
+fn successor_queue_index(queue_len: usize, current_idx: i32) -> Option<usize> {
+    if queue_len == 0 {
+        return None;
+    }
+    if current_idx < 0 {
+        return Some(0);
+    }
+
+    let next_idx = (current_idx as usize).checked_add(1)?;
+    Some(if next_idx >= queue_len { 0 } else { next_idx })
+}
+
 pub fn queue_next_preload(queue: &[String], current_idx: i32) {
     if !is_mpv_running() {
         return;
@@ -177,16 +189,13 @@ pub fn queue_next_preload(queue: &[String], current_idx: i32) {
             let _ = send_mpv_cmd(serde_json::json!(["playlist-remove", 1]));
         }
     }
-    if queue.len() <= 1 {
+    // A one-item queue has no successor while a current item exists. With no
+    // current item, however, the first persisted entry is the successor.
+    if current_idx >= 0 && queue.len() <= 1 {
         return;
     }
-    let next_idx = {
-        let n = (current_idx.max(0) as usize) + 1;
-        if n >= queue.len() {
-            0
-        } else {
-            n
-        }
+    let Some(next_idx) = successor_queue_index(queue.len(), current_idx) else {
+        return;
     };
     let next_path = &queue[next_idx];
     let _ = send_mpv_cmd(serde_json::json!(["loadfile", next_path, "append"]));
@@ -241,10 +250,43 @@ pub fn play_track(
     serde_json::json!({ "ok": true, "track": track_item })
 }
 
+struct PlaybackQueuePlan {
+    queue: Vec<String>,
+    index: usize,
+    source_name: String,
+}
+
+fn select_playback_queue(
+    state: &PlayerState,
+    library_queue: Vec<String>,
+) -> Option<PlaybackQueuePlan> {
+    if !state.queue.is_empty() {
+        let index = if state.queue_index >= 0 && (state.queue_index as usize) < state.queue.len() {
+            state.queue_index as usize
+        } else {
+            0
+        };
+        return Some(PlaybackQueuePlan {
+            queue: state.queue.clone(),
+            index,
+            source_name: state.source_name.clone(),
+        });
+    }
+
+    if library_queue.is_empty() {
+        return None;
+    }
+    Some(PlaybackQueuePlan {
+        queue: library_queue,
+        index: 0,
+        source_name: "Tracks".to_string(),
+    })
+}
+
 pub fn toggle_playback() -> serde_json::Value {
     if !is_mpv_running() {
         let state = load_state();
-        if let Some(tr) = state.current_track {
+        if let Some(tr) = state.current_track.as_ref() {
             return play_track(
                 &tr.path,
                 &state.source_name,
@@ -253,16 +295,28 @@ pub fn toggle_playback() -> serde_json::Value {
                 Some(state.last_position),
             );
         }
-        let lib = load_library();
-        if !lib.tracks.is_empty() {
-            let mut q: Vec<String> = lib.tracks.iter().map(|t| t.path.clone()).collect();
-            if state.shuffle && q.len() > 1 {
-                shuffle_queue(&mut q);
+        let library_queue = if state.queue.is_empty() {
+            let lib = load_library();
+            let mut library_queue: Vec<String> =
+                lib.tracks.iter().map(|t| t.path.clone()).collect();
+            if state.shuffle && library_queue.len() > 1 {
+                shuffle_queue(&mut library_queue);
             }
-            let target = q[0].clone();
-            return play_track(&target, "Tracks", 0, Some(q), None);
-        }
-        return serde_json::json!({ "ok": false, "error": "No tracks in library" });
+            library_queue
+        } else {
+            Vec::new()
+        };
+        let Some(plan) = select_playback_queue(&state, library_queue) else {
+            return serde_json::json!({ "ok": false, "error": "No tracks in library" });
+        };
+        let target = plan.queue[plan.index].clone();
+        return play_track(
+            &target,
+            &plan.source_name,
+            plan.index as i32,
+            Some(plan.queue),
+            None,
+        );
     }
 
     // Auto-sleep on pause: save timestamp and quit mpv to drop RAM to 0 MB
@@ -430,7 +484,7 @@ pub fn get_status() -> serde_json::Value {
                         }
                     }
 
-                    if let Some(idx) = state.queue.iter().position(|p| p == &mpv_path) {
+                    if let Some(idx) = state.queue_index_for_path_forward(&mpv_path) {
                         state.queue_index = idx as i32;
                     } else if !state.queue.is_empty() {
                         state.queue_index = (state.queue_index + 1) % (state.queue.len() as i32);
@@ -490,6 +544,70 @@ pub fn get_status() -> serde_json::Value {
         "queue_index": queue_index,
         "queue_total": queue_total
     })
+}
+
+fn validate_track_path(track_path: &str) -> Result<String, String> {
+    if track_path.is_empty() {
+        return Err("Track path is required".to_string());
+    }
+
+    let path = Path::new(track_path);
+    let metadata = fs::metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => format!("Track file does not exist: {track_path}"),
+        _ => format!("Could not access track file {track_path}: {error}"),
+    })?;
+    if !metadata.is_file() {
+        return Err(format!("Track path is not a file: {track_path}"));
+    }
+
+    fs::canonicalize(path)
+        .map(|canonical| canonical.to_string_lossy().into_owned())
+        .map_err(|error| format!("Could not resolve track file {track_path}: {error}"))
+}
+
+fn mutate_queue(
+    state: &mut PlayerState,
+    mutation: QueueMutation,
+    track_path: &str,
+) -> Result<usize, String> {
+    let validated_path = validate_track_path(track_path)?;
+    Ok(state.apply_queue_mutation(mutation, validated_path))
+}
+
+fn queue_mutation_error(state: &PlayerState, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error": error,
+        "queue_index": state.queue_index,
+        "queue_total": state.queue.len()
+    })
+}
+
+pub fn mutate_persisted_queue(mutation: QueueMutation, track_path: &str) -> serde_json::Value {
+    let mut state = load_state();
+    let inserted_index = match mutate_queue(&mut state, mutation, track_path) {
+        Ok(index) => index,
+        Err(error) => return queue_mutation_error(&state, &error),
+    };
+
+    save_state(&state);
+    queue_next_preload(&state.queue, state.queue_index);
+
+    serde_json::json!({
+        "ok": true,
+        "queue_index": state.queue_index,
+        "queue_total": state.queue.len(),
+        "inserted_index": inserted_index,
+        "track_path": state.queue[inserted_index]
+    })
+}
+
+pub fn queue_add(track_path: &str) -> serde_json::Value {
+    mutate_persisted_queue(QueueMutation::Append, track_path)
+}
+
+pub fn queue_play_next(track_path: &str) -> serde_json::Value {
+    mutate_persisted_queue(QueueMutation::PlayNext, track_path)
 }
 
 pub fn get_queue() -> serde_json::Value {
@@ -552,6 +670,113 @@ pub fn remove_queue_index(index: usize) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::PlayerState;
+
+    fn state_with_queue(queue: &[&str], queue_index: i32) -> PlayerState {
+        PlayerState {
+            queue: queue.iter().map(|path| path.to_string()).collect(),
+            queue_index,
+            source_name: "Queue".to_string(),
+            shuffle: false,
+            is_playing: false,
+            last_position: 0.0,
+            current_track: None,
+        }
+    }
+
+    #[test]
+    fn queue_mutation_appends_without_reshuffling() {
+        let mut state = state_with_queue(&["first"], 0);
+        state.shuffle = true;
+
+        let inserted_index =
+            state.apply_queue_mutation(QueueMutation::Append, "second".to_string());
+
+        assert_eq!(inserted_index, 1);
+        assert_eq!(state.queue, vec!["first", "second"]);
+        assert_eq!(state.queue_index, 0);
+        assert!(state.shuffle);
+    }
+
+    #[test]
+    fn queue_mutation_play_next_inserts_immediately_after_current() {
+        let mut state = state_with_queue(&["first", "third"], 0);
+
+        let inserted_index =
+            state.apply_queue_mutation(QueueMutation::PlayNext, "second".to_string());
+
+        assert_eq!(inserted_index, 1);
+        assert_eq!(state.queue, vec!["first", "second", "third"]);
+        assert_eq!(state.queue_index, 0);
+    }
+
+    #[test]
+    fn queue_mutation_play_next_without_current_inserts_at_front() {
+        let mut state = state_with_queue(&["existing"], -1);
+
+        let inserted_index = state.apply_queue_mutation(QueueMutation::PlayNext, "new".to_string());
+
+        assert_eq!(inserted_index, 0);
+        assert_eq!(state.queue, vec!["new", "existing"]);
+        assert_eq!(state.queue_index, -1);
+    }
+
+    #[test]
+    fn queue_transition_lookup_finds_duplicate_path_forward() {
+        let state = state_with_queue(&["duplicate", "current", "duplicate"], 1);
+
+        assert_eq!(state.queue_index_for_path_forward("duplicate"), Some(2));
+    }
+
+    #[test]
+    fn invalid_queue_mutation_leaves_state_unchanged() {
+        for invalid_path in ["", "/"] {
+            let mut state = state_with_queue(&["first", "second"], 0);
+            state.shuffle = true;
+            state.last_position = 12.5;
+            let before = state.clone();
+
+            let result = mutate_queue(&mut state, QueueMutation::Append, invalid_path);
+
+            assert!(result.is_err());
+            assert_eq!(state.queue, before.queue);
+            assert_eq!(state.queue_index, before.queue_index);
+            assert_eq!(state.source_name, before.source_name);
+            assert_eq!(state.shuffle, before.shuffle);
+            assert_eq!(state.is_playing, before.is_playing);
+            assert_eq!(state.last_position, before.last_position);
+            assert_eq!(state.current_track, before.current_track);
+        }
+    }
+
+    #[test]
+    fn playback_start_prefers_persisted_queue() {
+        let mut state = state_with_queue(&["persisted-first", "persisted-second"], 1);
+        state.shuffle = true;
+
+        let plan = select_playback_queue(&state, vec!["library".to_string()]).unwrap();
+
+        assert_eq!(plan.queue, vec!["persisted-first", "persisted-second"]);
+        assert_eq!(plan.index, 1);
+        assert_eq!(plan.source_name, "Queue");
+    }
+
+    #[test]
+    fn existing_toggle_fallback_still_uses_library_without_persisted_queue() {
+        let state = state_with_queue(&[], -1);
+
+        let plan = select_playback_queue(&state, vec!["library".to_string()]).unwrap();
+
+        assert_eq!(plan.queue, vec!["library"]);
+        assert_eq!(plan.index, 0);
+        assert_eq!(plan.source_name, "Tracks");
+    }
+
+    #[test]
+    fn queue_successor_is_immediate_and_uses_front_without_current() {
+        assert_eq!(successor_queue_index(3, 1), Some(2));
+        assert_eq!(successor_queue_index(3, -1), Some(0));
+    }
 
     #[test]
     fn test_play_queue_index_out_of_bounds() {

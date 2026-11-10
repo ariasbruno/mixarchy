@@ -9,8 +9,9 @@ mod trusted;
 use std::path::PathBuf;
 
 use engine::{
-    get_queue, get_status, next_track, play_queue_index, play_track, prev_track,
-    remove_queue_index, seek_playback, stop_playback, toggle_playback, toggle_shuffle,
+    get_queue, get_status, next_track, play_queue_index, play_track, prev_track, queue_add,
+    queue_play_next, remove_queue_index, seek_playback, stop_playback, toggle_playback,
+    toggle_shuffle,
 };
 use library::{default_music_dir, lib_cache_file, load_library_from, load_state, scan_library};
 
@@ -20,7 +21,7 @@ fn main() {
         println!(
             "{}",
             serde_json::json!({
-                "error": "Usage: mixarchy-ctl [scan|library|status|queue|queue-remove|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics|playlist-create|playlist-add|playlist-remove|playlist-rename|playlist-delete]"
+                "error": "Usage: mixarchy-ctl [scan|library|status|queue|queue-add|queue-play-next|queue-remove|play-index|play|play-queue|toggle|stop|next|prev|shuffle|seek|cover|lyrics|playlist-create|playlist-add|playlist-remove|playlist-rename|playlist-delete]"
             })
         );
         return;
@@ -49,6 +50,14 @@ fn main() {
         }
         "status" => get_status(),
         "queue" => get_queue(),
+        "queue-add" => match args.get(2) {
+            Some(track_path) => queue_add(track_path),
+            None => serde_json::json!({ "ok": false, "error": "Missing track path argument" }),
+        },
+        "queue-play-next" => match args.get(2) {
+            Some(track_path) => queue_play_next(track_path),
+            None => serde_json::json!({ "ok": false, "error": "Missing track path argument" }),
+        },
         "queue-remove" => {
             if args.len() > 2 {
                 if let Ok(idx) = args[2].parse::<usize>() {

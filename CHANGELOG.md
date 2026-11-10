@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Persistent Playlist Management**: Add backend and CLI operations to create empty M3U playlists, add or remove existing tracks, rename playlists, and delete playlists.
 - **Safe Playlist Mutations**: Validate display names and stored paths, reject collisions without overwriting files, preserve M3U comments and ordering, write changes atomically, and refresh the derived library index after accepted mutations.
+- **Queue Track Actions**: Add `queue-add` and `queue-play-next` backend and CLI operations that validate track files, update the persisted playback queue without interrupting the current song, and report coherent queue indexes.
 
 ## [1.3.0] - 2026-11-08
 
