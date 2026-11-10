@@ -128,8 +128,20 @@ Panel {
   property bool queueLoading: false
   property bool queueUserScrolled: false
 
+  // The opened playlist is identified by its canonical stored path. The
+  // display name is presentation-only and must never be used as identity.
+  property string activePlaylistPath: ""
   property string activePlaylistName: ""
   property var activePlaylistTrackPaths: []
+  property string actionFeedback: ""
+  property bool actionFeedbackIsError: false
+  property string contextTrackPath: ""
+  property string contextTrackTitle: ""
+  property real contextMenuX: 0
+  property real contextMenuY: 0
+  // Commands submitted while another action is running wait here. The
+  // action process remains the single serialized backend boundary.
+  property var pendingActions: []
   property string searchFilter: ""
   property bool lockSearchQueue: false
   property string sortMode: "artist" // "artist" | "album" | "title" | "recent" | "duration"
@@ -170,6 +182,9 @@ Panel {
   property int trackCount: 0
   property int playlistCount: 0
   property bool libraryLoading: false
+  // Increments after accepted playlist mutations. A library read that began
+  // before the mutation must not overwrite the freshly updated local state.
+  property int libraryStateVersion: 0
 
   // Player state
   property bool isPlaying: false
@@ -392,6 +407,8 @@ Panel {
 
   Process {
     id: libProc
+    property bool pendingRefresh: false
+    property int stateVersionAtStart: 0
     // True once onExited ran for the CURRENT run (cleared at run start).
     // Quickshell's Process does NOT emit exited for QProcess::FailedToStart
     // (upstream src/io/process.cpp: errorOccurred only warns + emits
@@ -405,13 +422,20 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.libraryLoading = false
-        try {
-          var res = JSON.parse(text)
-          root.tracks = res.tracks || []
-          root.playlists = res.playlists || []
-          root.trackCount = res.track_count || root.tracks.length
-          root.playlistCount = res.playlist_count || root.playlists.length
-        } catch (e) { console.warn("Mixarchy: library parse: " + e) }
+        if (libProc.stateVersionAtStart === root.libraryStateVersion) {
+          try {
+            var res = JSON.parse(text)
+            root.tracks = res.tracks || []
+            root.playlists = res.playlists || []
+            root.trackCount = res.track_count || root.tracks.length
+            root.playlistCount = res.playlist_count || root.playlists.length
+            root.reconcileActivePlaylist(root.playlists)
+          } catch (e) { console.warn("Mixarchy: library parse: " + e) }
+        }
+        if (libProc.pendingRefresh) {
+          libProc.pendingRefresh = false
+          Qt.callLater(function() { root.refreshLibrary() })
+        }
       }
     }
     onExited: function(exitCode, exitStatus) {
@@ -439,6 +463,7 @@ Panel {
         // with no error surfaced. Unstick the UI.
         console.warn("Mixarchy: library process failed to start")
         root.libraryLoading = false
+        libProc.pendingRefresh = false
         root.bootError = "Mixarchy: backend library process failed unexpectedly."
       }
     }
@@ -447,6 +472,7 @@ Panel {
   Process {
     id: actionProc
     property var nextAction: null
+    property var actionResult: null
     // Same sawExited invariant as libProc: tracks whether onExited ran for
     // the current run so a FailedToStart (no exited, no streamEnded) can be
     // distinguished from a clean/crashed end.
@@ -456,28 +482,51 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.refreshStatus()
-        if (actionProc.nextAction) {
-          var act = actionProc.nextAction
-          actionProc.nextAction = null
-          act()
+        actionProc.actionResult = null
+        try {
+          actionProc.actionResult = JSON.parse(text)
+        } catch (e) {
+          actionProc.actionResult = {
+            ok: false,
+            error: "Backend action returned an unreadable response."
+          }
+          console.warn("Mixarchy: action parse: " + e)
         }
+        // Status is read-only and safe after every command. Mutation-specific
+        // library/queue refreshes happen only in successful callbacks.
+        root.refreshStatus()
       }
     }
     onExited: function(exitCode, exitStatus) {
       actionProc.sawExited = true
       if (exitStatus !== 0) {
-        // Crashed/killed, rather than a clean exit. onStreamFinished already
-        // ran first (upstream streamEnded-before-exited order), refreshing
-        // status and dispatching nextAction — log for diagnosis, don't
-        // double-dispatch.
         console.warn("Mixarchy: action process ended abnormally (exitStatus " + exitStatus + ", code " + exitCode + ")")
       }
-      if (exitCode !== 0) {
+
+      var result = actionProc.actionResult
+      actionProc.actionResult = null
+      if (exitCode !== 0 || exitStatus !== 0) {
+        result = { ok: false, error: "Backend action failed unexpectedly." }
         root.bootError = "Mixarchy: backend action process failed unexpectedly."
+      } else if (!result || result.ok !== true) {
+        // The backend uses a successful process exit for both accepted and
+        // rejected operations. Preserve its parsed error for the callback.
+        if (!result) {
+          result = { ok: false, error: "Backend action returned no response." }
+        }
       } else if (root.bootError.indexOf("Mixarchy: backend") === 0) {
         root.bootError = ""
       }
+
+      var callback = actionProc.nextAction
+      actionProc.nextAction = null
+      // Dispatch after the process transition has settled. A callback may
+      // enqueue the next command (playlist-create -> playlist-add), which is
+      // then drained by the serial action queue in order.
+      Qt.callLater(function() {
+        if (callback) callback(result)
+        Qt.callLater(root.startNextAction)
+      })
     }
     onRunningChanged: {
       if (actionProc.running) {
@@ -485,11 +534,22 @@ Panel {
         // must not leak into the new run's end decision.
         actionProc.sawExited = false
       } else if (!actionProc.sawExited) {
-        // FailedToStart: onExited/onStreamFinished never fire, so the action
-        // never ran and its continuation must not run either (a queued
-        // rescan's refreshLibrary callback, for example).
-        console.warn("Mixarchy: action process failed to start; dropping pending continuation")
+        // FailedToStart: neither stdout nor onExited fires. Report the
+        // failure to every queued callback instead of silently dropping it.
+        console.warn("Mixarchy: action process failed to start; reporting failed actions")
+        var failure = {
+          ok: false,
+          error: "Backend action failed to start."
+        }
+        var callback = actionProc.nextAction
         actionProc.nextAction = null
+        actionProc.actionResult = null
+        var queued = root.pendingActions.slice()
+        root.pendingActions = []
+        if (callback) callback(failure)
+        for (var i = 0; i < queued.length; i++) {
+          if (queued[i].onDone) queued[i].onDone(failure)
+        }
         root.bootError = "Mixarchy: backend action process failed unexpectedly."
       }
     }
@@ -642,6 +702,7 @@ Panel {
 
   Process {
     id: queueProc
+    property bool pendingRefresh: false
     property bool sawExited: false
     clearEnvironment: true
     environment: root.cleanEnv
@@ -666,6 +727,10 @@ Panel {
             }
           }
         } catch (e) { }
+        if (queueProc.pendingRefresh) {
+          queueProc.pendingRefresh = false
+          Qt.callLater(function() { root.fetchQueue() })
+        }
       }
     }
     onExited: function(exitCode, exitStatus) {
@@ -676,6 +741,7 @@ Panel {
         queueProc.sawExited = false
       } else if (!queueProc.sawExited) {
         root.queueLoading = false
+        queueProc.pendingRefresh = false
       }
     }
   }
@@ -919,13 +985,48 @@ Panel {
 
   function runCtl(args, onDone) {
     // Never execute before the pinned binary is verified.
-    if (!root.bootstrapped) return
-    if (actionProc.running) return
-    var cmd = [root.ctlPath].concat(args)
-    actionProc.nextAction = onDone || null
-    actionProc.command = cmd
+    if (!root.bootstrapped) {
+      if (onDone) {
+        Qt.callLater(function() {
+          onDone({ ok: false, error: "Backend is not ready." })
+        })
+      }
+      return
+    }
+
+    // Keep one focused backend process boundary. Commands submitted during a
+    // running action wait in order instead of being silently discarded.
+    root.pendingActions = root.pendingActions.concat([{
+      command: [root.ctlPath].concat(args),
+      onDone: onDone || null
+    }])
+    root.startNextAction()
+  }
+
+  function startNextAction() {
+    if (actionProc.running || root.pendingActions.length === 0) return
+    var entry = root.pendingActions[0]
+    root.pendingActions = root.pendingActions.slice(1)
+    actionProc.nextAction = entry.onDone
+    actionProc.actionResult = null
+    actionProc.command = entry.command
     actionProc.sawExited = false
     actionProc.running = true
+  }
+
+  function showActionFeedback(message, isError) {
+    root.actionFeedback = String(message || "")
+    root.actionFeedbackIsError = !!isError
+  }
+
+  function actionError(result, fallback) {
+    var message = result && result.error ? String(result.error) : String(fallback || "Action failed.")
+    message = message.trim()
+    if (message === "") message = String(fallback || "Action failed.")
+    // Keep backend failures visible without letting a long filesystem error
+    // dominate the compact panel.
+    if (message.length > 180) message = message.substring(0, 177) + "…"
+    return message
   }
 
   function refreshStatus() {
@@ -938,9 +1039,295 @@ Panel {
     // Never spawn the backend before the pinned binary is verified.
     if (!root.bootstrapped) return
     root.libraryLoading = true
-    if (!libProc.running) {
-      libProc.sawExited = false
-      libProc.running = true
+    if (libProc.running) {
+      // The mutation refreshed the backend cache. Fetch it again after the
+      // current library read completes so the UI cannot keep stale cards.
+      libProc.pendingRefresh = true
+      return
+    }
+    libProc.sawExited = false
+    libProc.stateVersionAtStart = root.libraryStateVersion
+    libProc.running = true
+  }
+
+  function openPlaylist(playlist) {
+    if (!playlist || !playlist.path) return
+    root.activePlaylistPath = playlist.path
+    root.activePlaylistName = playlist.name || ""
+    root.activePlaylistTrackPaths = playlist.track_paths || []
+    root.currentScreen = "tracks"
+  }
+
+  function reconcileActivePlaylist(libraryPlaylists) {
+    if (root.activePlaylistPath === "") return
+    var list = libraryPlaylists || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].path === root.activePlaylistPath) {
+        root.activePlaylistName = list[i].name || ""
+        root.activePlaylistTrackPaths = list[i].track_paths || []
+        return
+      }
+    }
+  }
+
+  function clearActivePlaylist() {
+    root.activePlaylistPath = ""
+    root.activePlaylistName = ""
+    root.activePlaylistTrackPaths = []
+  }
+
+  function playlistNameForPath(path) {
+    var list = root.playlists || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].path === path) return list[i].name || ""
+    }
+    return ""
+  }
+
+  function upsertLibraryPlaylist(playlist) {
+    if (!playlist || !playlist.path) return
+    var list = (root.playlists || []).slice()
+    var found = false
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].path === playlist.path) {
+        list[i] = playlist
+        found = true
+        break
+      }
+    }
+    if (!found) list.push(playlist)
+    root.playlists = list
+    root.playlistCount = list.length
+    root.libraryStateVersion++
+  }
+
+  function removeLibraryPlaylist(playlistPath) {
+    var list = []
+    var source = root.playlists || []
+    for (var i = 0; i < source.length; i++) {
+      if (source[i].path !== playlistPath) list.push(source[i])
+    }
+    root.playlists = list
+    root.playlistCount = list.length
+    root.libraryStateVersion++
+  }
+
+  function utf8ByteLength(value) {
+    var bytes = 0
+    for (var i = 0; i < value.length; i++) {
+      var code = value.charCodeAt(i)
+      if (code < 0x80) {
+        bytes += 1
+      } else if (code < 0x800) {
+        bytes += 2
+      } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+        var next = value.charCodeAt(i + 1)
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          bytes += 4
+          i++
+        } else {
+          bytes += 3
+        }
+      } else {
+        bytes += 3
+      }
+    }
+    return bytes
+  }
+
+  function playlistNameError(value) {
+    var name = String(value || "").trim()
+    if (name === "") return "Playlist name cannot be empty."
+    if (name === "." || name === "..") return "Playlist name cannot be a path component."
+    if (name.indexOf("/") !== -1 || name.indexOf("\\") !== -1) {
+      return "Playlist name cannot contain path separators."
+    }
+    if (/[\u0000-\u001f\u007f]/.test(name)) {
+      return "Playlist name cannot contain control characters."
+    }
+    if (root.utf8ByteLength(name) > 200) {
+      return "Playlist name cannot exceed 200 bytes."
+    }
+    return ""
+  }
+
+  function addTrackToPlaylistFromMenu(playlistPath) {
+    var trackPath = root.contextTrackPath
+    trackContextMenu.close()
+    root.addTrackToPlaylist(playlistPath, trackPath)
+  }
+
+  function addTrackToPlaylist(playlistPath, trackPath) {
+    if (!playlistPath || !trackPath) return
+    var trackTitle = root.contextTrackTitle
+    var playlistName = root.playlistNameForPath(playlistPath)
+    root.runCtl(["playlist-add", playlistPath, trackPath], function(result) {
+      if (!result || result.ok !== true) {
+        root.showActionFeedback(root.actionError(result, "Could not add the song to the playlist."), true)
+        return
+      }
+      if (result.playlist) {
+        root.upsertLibraryPlaylist(result.playlist)
+        // The opened playlist is identified by path. Update its track scope
+        // immediately so the visible count/cards do not wait for the library
+        // refresh to finish.
+        if (root.activePlaylistPath === playlistPath) {
+          root.activePlaylistTrackPaths = result.playlist.track_paths || []
+        }
+      }
+      root.showActionFeedback("Added “" + trackTitle + "” to “" + playlistName + "”.", false)
+      root.refreshLibrary()
+    })
+  }
+
+  function createPlaylistWithTrack(name, trackPath, trackTitle) {
+    root.runCtl(["playlist-create", name], function(createResult) {
+      if (!createResult || createResult.ok !== true || !createResult.playlist || !createResult.playlist.path) {
+        root.showActionFeedback(root.actionError(createResult, "Could not create the playlist."), true)
+        return
+      }
+
+      var created = createResult.playlist
+      root.upsertLibraryPlaylist(created)
+      root.runCtl(["playlist-add", created.path, trackPath], function(addResult) {
+        if (!addResult || addResult.ok !== true) {
+          root.showActionFeedback("Created “" + (created.name || name) + "”, but could not add the song: " + root.actionError(addResult, "Playlist update failed."), true)
+          root.refreshLibrary()
+          return
+        }
+        if (addResult.playlist) root.upsertLibraryPlaylist(addResult.playlist)
+        root.showActionFeedback("Created “" + (created.name || name) + "” and added “" + trackTitle + "”.", false)
+        root.refreshLibrary()
+      })
+    })
+  }
+
+  function createEmptyPlaylist(name) {
+    root.runCtl(["playlist-create", name], function(result) {
+      if (!result || result.ok !== true) {
+        root.showActionFeedback(root.actionError(result, "Could not create the playlist."), true)
+        return
+      }
+      if (result.playlist) root.upsertLibraryPlaylist(result.playlist)
+      root.showActionFeedback("Created playlist “" + (result.playlist ? result.playlist.name : name) + "”.", false)
+      root.refreshLibrary()
+    })
+  }
+
+  function addTrackToQueue(trackPath, trackTitle, playNext) {
+    var command = playNext ? "queue-play-next" : "queue-add"
+    root.runCtl([command, trackPath], function(result) {
+      if (!result || result.ok !== true) {
+        root.showActionFeedback(root.actionError(result, playNext ? "Could not play the song next." : "Could not add the song to the queue."), true)
+        return
+      }
+      root.fetchQueue()
+      root.showActionFeedback(playNext ? "“" + trackTitle + "” will play next." : "Added “" + trackTitle + "” to the queue.", false)
+    })
+  }
+
+  function removeTrackFromActivePlaylist(trackPath, trackTitle) {
+    if (root.activePlaylistPath === "" || !trackPath) return
+    var playlistPath = root.activePlaylistPath
+    var playlistName = root.activePlaylistName
+    root.runCtl(["playlist-remove", playlistPath, trackPath], function(result) {
+      if (!result || result.ok !== true) {
+        root.showActionFeedback(root.actionError(result, "Could not remove the song from the playlist."), true)
+        return
+      }
+      if (result.playlist && result.playlist.path === playlistPath) {
+        root.activePlaylistTrackPaths = result.playlist.track_paths || []
+        root.upsertLibraryPlaylist(result.playlist)
+      }
+      root.showActionFeedback("Removed “" + trackTitle + "” from “" + playlistName + "”.", false)
+      root.refreshLibrary()
+    })
+  }
+
+  function renamePlaylist(playlistPath, name) {
+    root.runCtl(["playlist-rename", playlistPath, name], function(result) {
+      if (!result || result.ok !== true || !result.playlist) {
+        root.showActionFeedback(root.actionError(result, "Could not rename the playlist."), true)
+        return
+      }
+      if (root.activePlaylistPath === playlistPath) {
+        root.activePlaylistPath = result.playlist.path
+        root.activePlaylistName = result.playlist.name || ""
+        root.activePlaylistTrackPaths = result.playlist.track_paths || []
+      }
+      root.removeLibraryPlaylist(playlistPath)
+      root.upsertLibraryPlaylist(result.playlist)
+      root.showActionFeedback("Renamed playlist to “" + (result.playlist.name || name) + "”.", false)
+      root.refreshLibrary()
+    })
+  }
+
+  function deletePlaylist(playlistPath, playlistName) {
+    root.runCtl(["playlist-delete", playlistPath], function(result) {
+      if (!result || result.ok !== true) {
+        root.showActionFeedback(root.actionError(result, "Could not delete the playlist."), true)
+        return
+      }
+      if (root.activePlaylistPath === playlistPath) root.clearActivePlaylist()
+      root.removeLibraryPlaylist(playlistPath)
+      root.showActionFeedback("Deleted playlist “" + playlistName + "”.", false)
+      root.refreshLibrary()
+    })
+  }
+
+  function openTrackContextMenu(track, mouse, area) {
+    if (!track || !track.path) return
+    root.contextTrackPath = track.path
+    root.contextTrackTitle = track.title || track.filename || "Song"
+    // KeyboardPanel is a PanelWindow. keyCatcher is its QQuickItem content
+    // target, so both pointer mapping and popup coordinates use Item space.
+    var point = area.mapToItem(keyCatcher, mouse.x, mouse.y)
+    root.contextMenuX = Math.max(Style.space(8), Math.min(point.x, Math.max(Style.space(8), keyCatcher.width - trackContextMenu.width - Style.space(8))))
+    root.contextMenuY = Math.max(Style.space(8), Math.min(point.y, Math.max(Style.space(8), keyCatcher.height - Style.space(352))))
+    trackContextMenu.open()
+  }
+
+  function openPlaylistNameDialog(mode, trackPath, playlistPath, initialName) {
+    playlistNamePopup.mode = mode
+    playlistNamePopup.pendingTrackPath = trackPath || ""
+    // contextTrackTitle is initialized as a root string and is set before the
+    // context menu opens, so every dialog mode has a defined title value.
+    playlistNamePopup.pendingTrackTitle = root.contextTrackTitle || ""
+    playlistNamePopup.pendingPlaylistPath = playlistPath || ""
+    playlistNamePopup.initialName = initialName || ""
+    playlistNamePopup.validationError = ""
+    playlistNamePopup.open()
+  }
+
+  function openDeletePlaylistDialog(playlistPath, playlistName) {
+    if (!playlistPath) return
+    deletePlaylistPopup.pendingPlaylistPath = playlistPath
+    deletePlaylistPopup.pendingPlaylistName = playlistName || ""
+    deletePlaylistPopup.open()
+  }
+
+  function submitPlaylistNameDialog() {
+    var name = playlistNameField.text.trim()
+    var validationError = root.playlistNameError(name)
+    if (validationError !== "") {
+      playlistNamePopup.validationError = validationError
+      playlistNameField.forceActiveFocus()
+      return
+    }
+
+    var mode = playlistNamePopup.mode
+    var trackPath = playlistNamePopup.pendingTrackPath
+    var trackTitle = playlistNamePopup.pendingTrackTitle
+    var playlistPath = playlistNamePopup.pendingPlaylistPath
+    playlistNamePopup.validationError = ""
+    playlistNamePopup.close()
+
+    if (mode === "create") {
+      root.createPlaylistWithTrack(name, trackPath, trackTitle)
+    } else if (mode === "create-empty") {
+      root.createEmptyPlaylist(name)
+    } else if (mode === "rename") {
+      root.renamePlaylist(playlistPath, name)
     }
   }
 
@@ -974,7 +1361,12 @@ Panel {
     root.trackThumbs = ({})
     root.coverRequested = ({})
     root.coverQueue = []
-    runCtl(["scan"], function() {
+    runCtl(["scan"], function(result) {
+      if (!result || result.ok !== true) {
+        root.showActionFeedback(root.actionError(result, "Could not rescan the library."), true)
+        return
+      }
+      root.libraryStateVersion++
       refreshLibrary()
     })
   }
@@ -1047,6 +1439,12 @@ Panel {
 
   function fetchQueue() {
     if (!root.bootstrapped) return
+    if (queueProc.running) {
+      // Fetch once more after the current read completes so a successful
+      // queue mutation is never hidden by an overlapping refresh.
+      queueProc.pendingRefresh = true
+      return
+    }
     if (!root.playbackQueue || root.playbackQueue.length === 0) {
       root.queueLoading = true
     }
@@ -1217,7 +1615,10 @@ Panel {
   readonly property var activeFullTracks: {
     var list = root.tracks || []
     var plPaths = root.activePlaylistTrackPaths || []
-    if (root.activePlaylistName !== "" && plPaths.length > 0) {
+    // An opened playlist remains the active scope even when it is empty. The
+    // canonical path, not the display name, decides whether this filter is
+    // active.
+    if (root.activePlaylistPath !== "") {
       var pathSet = {}
       for (var p = 0; p < plPaths.length; p++) {
         pathSet[plPaths[p]] = true
@@ -1264,7 +1665,11 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: trackContextMenu.opened
+      ? queueActionButton
+      : (playlistNamePopup.opened
+        ? playlistNameField
+        : (deletePlaylistPopup.opened ? cancelDeleteButton : keyCatcher))
 
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(Style.space(560), Style.space(640))
@@ -1272,7 +1677,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: searchField.activeFocus
+      blocked: searchField.activeFocus || trackContextMenu.opened || playlistNamePopup.opened || deletePlaylistPopup.opened
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -1400,21 +1805,51 @@ Panel {
           }
         }
 
+        // Concise result feedback for user-initiated playlist/queue actions.
+        // Success and failure are distinguished by color and text, never by
+        // silently refreshing state.
+        Rectangle {
+          id: actionFeedbackBanner
+          Layout.fillWidth: true
+          Layout.preferredHeight: actionFeedbackText.implicitHeight + Style.space(8)
+          visible: root.actionFeedback !== ""
+          radius: Style.cornerRadius
+          color: root.actionFeedbackIsError
+            ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18)
+            : Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.10)
+
+          Text {
+            id: actionFeedbackText
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            anchors.topMargin: Style.space(4)
+            anchors.bottomMargin: Style.space(4)
+            verticalAlignment: Text.AlignVCenter
+            wrapMode: Text.WordWrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            color: root.actionFeedbackIsError ? Commons.Color.urgent : Commons.Color.foreground
+            text: root.actionFeedback
+          }
+        }
+
         // ========================================== [NAV TABS]
         RowLayout {
           Layout.fillWidth: true
           spacing: Style.space(6)
 
           Button {
-            text: root.activePlaylistName !== "" ? (root.activePlaylistName + " (" + root.activePlaylistTrackPaths.length + ")") : ("Tracks (" + root.trackCount + ")")
+            text: root.activePlaylistPath !== "" ? (root.activePlaylistName + " (" + root.activePlaylistTrackPaths.length + ")") : ("Tracks (" + root.trackCount + ")")
             iconText: "󰎆"
             bordered: true
             selected: root.currentScreen === "tracks"
             onClicked: {
-              if (root.currentScreen === "tracks" && root.activePlaylistName !== "") {
+              if (root.currentScreen === "tracks" && root.activePlaylistPath !== "") {
                 // Clear playlist filter when clicking again
-                root.activePlaylistName = ""
-                root.activePlaylistTrackPaths = []
+                root.clearActivePlaylist()
               }
               root.currentScreen = "tracks"
             }
@@ -1463,6 +1898,38 @@ Panel {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: Style.space(6)
+
+            // Playlist management is available only for the opened playlist.
+            // The canonical path remains the action identity; the name is
+            // display-only.
+            RowLayout {
+              id: playlistManagementRow
+              Layout.fillWidth: true
+              visible: root.activePlaylistPath !== ""
+              spacing: Style.space(6)
+
+              Text {
+                text: root.activePlaylistName
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.weight: Font.Bold
+                color: Commons.Color.foreground
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+
+              Button {
+                text: "Rename playlist"
+                bordered: true
+                onClicked: root.openPlaylistNameDialog("rename", "", root.activePlaylistPath, root.activePlaylistName)
+              }
+
+              Button {
+                text: "Delete playlist"
+                bordered: true
+                onClicked: root.openDeletePlaylistDialog(root.activePlaylistPath, root.activePlaylistName)
+              }
+            }
 
             // Search bar with queue lock toggle
             RowLayout {
@@ -1686,9 +2153,17 @@ Panel {
                 MouseArea {
                   id: trackArea
                   anchors.fill: parent
+                  acceptedButtons: Qt.LeftButton | Qt.RightButton
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: {
+                  onClicked: function(mouse) {
+                    if (mouse.button === Qt.RightButton) {
+                      // Context actions must never enter the normal left-click
+                      // playback path.
+                      mouse.accepted = true
+                      root.openTrackContextMenu(modelData, mouse, trackArea)
+                      return
+                    }
                     tracksListView.currentIndex = index
                     root.playTrackAtIndex(index)
                   }
@@ -1702,6 +2177,26 @@ Panel {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: Style.space(6)
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+
+              Text {
+                text: "Manage playlists"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.weight: Font.Bold
+                color: Commons.Color.foreground
+                Layout.fillWidth: true
+              }
+
+              Button {
+                text: "New playlist"
+                bordered: true
+                onClicked: root.openPlaylistNameDialog("create-empty", "", "", "")
+              }
+            }
 
             ListView {
               id: plListView
@@ -1767,9 +2262,7 @@ Panel {
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
-                    root.activePlaylistName = modelData.name
-                    root.activePlaylistTrackPaths = modelData.track_paths || []
-                    root.currentScreen = "tracks"
+                    root.openPlaylist(modelData)
                   }
                 }
               }
@@ -2700,6 +3193,371 @@ Panel {
                 Layout.minimumWidth: Style.space(28)
               }
             }
+          }
+        }
+      }
+    }
+  }
+
+  // Themed track context menu. It is positioned at the pointer and uses the
+  // same surfaces, typography, spacing, and qs.Ui buttons as the panel.
+  Popup {
+    id: trackContextMenu
+    // KeyboardPanel is a window; keyCatcher is the QQuickItem content target.
+    parent: keyCatcher
+    x: root.contextMenuX
+    y: root.contextMenuY
+    width: Math.max(Style.space(1), Math.min(Style.space(300), keyCatcher.width - Style.space(16)))
+    padding: Style.space(8)
+    modal: false
+    focus: true
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+    onOpened: {
+      var maxY = Math.max(Style.space(8), keyCatcher.height - trackContextMenu.height - Style.space(8))
+      root.contextMenuY = Math.max(Style.space(8), Math.min(root.contextMenuY, maxY))
+      queueActionButton.forceActiveFocus()
+    }
+    onClosed: {
+      if (!playlistNamePopup.opened && !deletePlaylistPopup.opened) {
+        Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      }
+    }
+
+    background: Rectangle {
+      radius: Style.cornerRadius
+      color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+      border.width: 1
+      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+    }
+
+    contentItem: ColumnLayout {
+      spacing: Style.space(4)
+
+      Button {
+        id: queueActionButton
+        Layout.fillWidth: true
+        text: "Add to queue"
+        bordered: false
+        focusable: true
+        onClicked: {
+          var path = root.contextTrackPath
+          var title = root.contextTrackTitle
+          trackContextMenu.close()
+          root.addTrackToQueue(path, title, false)
+        }
+      }
+
+      Button {
+        Layout.fillWidth: true
+        text: "Play next"
+        bordered: false
+        focusable: true
+        onClicked: {
+          var path = root.contextTrackPath
+          var title = root.contextTrackTitle
+          trackContextMenu.close()
+          root.addTrackToQueue(path, title, true)
+        }
+      }
+
+      PanelSeparator { Layout.fillWidth: true }
+
+      Text {
+        text: "Add to playlist"
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        font.weight: Font.Bold
+        color: Commons.Color.foreground
+        Layout.fillWidth: true
+      }
+
+      Text {
+        Layout.fillWidth: true
+        visible: root.playlists.length === 0
+        text: "No playlists yet"
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        color: Qt.darker(root.foreground, 1.4)
+      }
+
+      ListView {
+        id: playlistMenuList
+        Layout.fillWidth: true
+        Layout.preferredHeight: root.playlists.length > 0
+          ? Math.min(root.playlists.length * Style.space(34), Style.space(150))
+          : 0
+        visible: root.playlists.length > 0
+        clip: true
+        spacing: Style.space(2)
+        model: root.playlists
+
+        delegate: BorderSurface {
+          id: playlistMenuItem
+          required property var modelData
+          width: playlistMenuList.width
+          height: Style.space(32)
+          radius: Style.cornerRadius
+          borderSpec: Border.controlSpec(activeFocus
+            ? "focus"
+            : (playlistMenuMouse.containsMouse ? "hover-cursor" : "normal"), root.foreground, Commons.Color.accent)
+          color: activeFocus
+            ? Style.focusFillFor(root.foreground, Commons.Color.accent)
+            : (playlistMenuMouse.containsMouse
+              ? Style.hoverFillFor(root.foreground, Commons.Color.accent)
+              : "transparent")
+
+          function activate() {
+            root.addTrackToPlaylistFromMenu(modelData.path)
+          }
+
+          Text {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(8)
+            anchors.rightMargin: Style.space(8)
+            verticalAlignment: Text.AlignVCenter
+            text: playlistMenuItem.modelData.name
+            elide: Text.ElideRight
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            color: Commons.Color.foreground
+          }
+
+          MouseArea {
+            id: playlistMenuMouse
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+              playlistMenuItem.forceActiveFocus()
+              playlistMenuItem.activate()
+            }
+          }
+
+          Keys.onReturnPressed: function(event) {
+            playlistMenuItem.activate()
+            event.accepted = true
+          }
+          Keys.onEnterPressed: function(event) {
+            playlistMenuItem.activate()
+            event.accepted = true
+          }
+        }
+      }
+
+      Button {
+        Layout.fillWidth: true
+        text: "Create new playlist and add song"
+        bordered: true
+        focusable: true
+        onClicked: {
+          var trackPath = root.contextTrackPath
+          trackContextMenu.close()
+          root.openPlaylistNameDialog("create", trackPath, "", "")
+        }
+      }
+
+      Button {
+        Layout.fillWidth: true
+        visible: root.activePlaylistPath !== ""
+        text: "Remove from playlist"
+        bordered: false
+        focusable: true
+        onClicked: {
+          var trackPath = root.contextTrackPath
+          var trackTitle = root.contextTrackTitle
+          trackContextMenu.close()
+          root.removeTrackFromActivePlaylist(trackPath, trackTitle)
+        }
+      }
+    }
+  }
+
+  // Shared name editor for create/rename. The backend remains the final
+  // authority; this field prevents the common invalid cases before submit.
+  Popup {
+    id: playlistNamePopup
+    parent: keyCatcher
+    x: Math.max(Style.space(8), (keyCatcher.width - width) / 2)
+    y: Math.max(Style.space(8), (keyCatcher.height - height) / 2)
+    width: Math.max(Style.space(1), Math.min(Style.space(360), keyCatcher.width - Style.space(16)))
+    padding: Style.space(12)
+    modal: true
+    focus: true
+    closePolicy: Popup.CloseOnEscape
+
+    property string mode: "create"
+    property string pendingTrackPath: ""
+    property string pendingTrackTitle: ""
+    property string pendingPlaylistPath: ""
+    property string initialName: ""
+    property string validationError: ""
+
+    onOpened: {
+      y = Math.max(Style.space(8), Math.min(y, Math.max(Style.space(8), keyCatcher.height - height - Style.space(8))))
+      playlistNameField.text = initialName
+      playlistNameField.forceActiveFocus()
+    }
+    onClosed: {
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+
+    background: Rectangle {
+      radius: Style.cornerRadius
+      color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+      border.width: 1
+      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+    }
+
+    contentItem: ColumnLayout {
+      spacing: Style.space(8)
+
+      Text {
+        Layout.fillWidth: true
+        text: playlistNamePopup.mode === "rename"
+          ? "Rename playlist"
+          : (playlistNamePopup.mode === "create"
+            ? "Create playlist"
+            : "New playlist")
+        font.family: Style.font.family
+        font.pixelSize: Style.font.heading
+        font.weight: Font.Bold
+        color: Commons.Color.foreground
+      }
+
+      Text {
+        Layout.fillWidth: true
+        text: playlistNamePopup.mode === "create"
+          ? "Create a playlist and add “" + playlistNamePopup.pendingTrackTitle + "”."
+          : (playlistNamePopup.mode === "rename"
+            ? "Enter a new display name. The stored file identity remains canonical."
+            : "Enter a display name for the new playlist.")
+        wrapMode: Text.WordWrap
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        color: Qt.darker(root.foreground, 1.4)
+      }
+
+      TextField {
+        id: playlistNameField
+        Layout.fillWidth: true
+        placeholderText: "Playlist name"
+        Keys.onReturnPressed: function(event) {
+          root.submitPlaylistNameDialog()
+          event.accepted = true
+        }
+      }
+
+      Text {
+        Layout.fillWidth: true
+        visible: playlistNamePopup.validationError !== ""
+        text: playlistNamePopup.validationError
+        wrapMode: Text.WordWrap
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        color: Commons.Color.urgent
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+
+        Item { Layout.fillWidth: true }
+
+        Button {
+          text: "Cancel"
+          bordered: true
+          focusable: true
+          onClicked: playlistNamePopup.close()
+        }
+
+        Button {
+          text: playlistNamePopup.mode === "rename" ? "Rename" : "Create"
+          bordered: true
+          focusable: true
+          onClicked: root.submitPlaylistNameDialog()
+        }
+      }
+    }
+  }
+
+  // Destructive playlist deletion is deliberately separated from the action
+  // that opens it. The playlist-delete command exists only in the confirmed
+  // handler below.
+  Popup {
+    id: deletePlaylistPopup
+    parent: keyCatcher
+    x: Math.max(Style.space(8), (keyCatcher.width - width) / 2)
+    y: Math.max(Style.space(8), (keyCatcher.height - height) / 2)
+    width: Math.max(Style.space(1), Math.min(Style.space(360), keyCatcher.width - Style.space(16)))
+    padding: Style.space(12)
+    modal: true
+    focus: true
+    closePolicy: Popup.CloseOnEscape
+
+    property string pendingPlaylistPath: ""
+    property string pendingPlaylistName: ""
+
+    onOpened: {
+      y = Math.max(Style.space(8), Math.min(y, Math.max(Style.space(8), keyCatcher.height - height - Style.space(8))))
+      cancelDeleteButton.forceActiveFocus()
+    }
+    onClosed: {
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    }
+
+    background: Rectangle {
+      radius: Style.cornerRadius
+      color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+      border.width: 1
+      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+    }
+
+    contentItem: ColumnLayout {
+      spacing: Style.space(8)
+
+      Text {
+        Layout.fillWidth: true
+        text: "Delete playlist?"
+        font.family: Style.font.family
+        font.pixelSize: Style.font.heading
+        font.weight: Font.Bold
+        color: Commons.Color.foreground
+      }
+
+      Text {
+        Layout.fillWidth: true
+        text: "Permanently delete “" + deletePlaylistPopup.pendingPlaylistName + "”? This cannot be undone."
+        wrapMode: Text.WordWrap
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+        color: Commons.Color.foreground
+      }
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+
+        Item { Layout.fillWidth: true }
+
+        Button {
+          id: cancelDeleteButton
+          text: "Cancel"
+          bordered: true
+          focusable: true
+          onClicked: deletePlaylistPopup.close()
+        }
+
+        Button {
+          text: "Delete playlist"
+          bordered: true
+          focusable: true
+          onClicked: {
+            var playlistPath = deletePlaylistPopup.pendingPlaylistPath
+            var playlistName = deletePlaylistPopup.pendingPlaylistName
+            deletePlaylistPopup.close()
+            root.deletePlaylist(playlistPath, playlistName)
           }
         }
       }

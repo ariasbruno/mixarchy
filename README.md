@@ -29,6 +29,8 @@ Mixarchy integrates natively into the Omarchy bar via **Quickshell** (Qt Quick /
 - **Multi-Criteria Sorting**: Quick sorting with ascending/descending toggle across **Artist**, **Album**, **Title**, **Duration**, or **Recent** (file modification time).
 - **Automatic Playlists**: Seamlessly detects and plays `.m3u` / `.m3u8` playlists nested in your music directory with relative path resolution.
 - **Persistent Playlist Editing**: Creates, renames, and deletes M3U playlists, adds or removes tracks while preserving comments and ordering, and refreshes the library index after every accepted change. Playlist identity is the canonical stored file path, not the display name.
+- **Contextual Playlist & Queue Actions**: Right-click a song to add it to an existing playlist, create a validated playlist and add the song, append it to the queue, or play it next. In an opened playlist, the same menu can remove the song. The contextual menu closes on selection, outside click, or Escape.
+- **Safe Playlist Controls**: Open a playlist to rename it, delete it with confirmation, or remove its songs. Accepted changes refresh the library and update the active playlist state shown in the panel.
 - **Non-Interrupting Queue Actions**: Append a track to the persisted playback queue or insert it immediately after the current item without replacing the song that is playing. Queue ordering, shuffle state, and the mpv preload successor remain coherent after every accepted action.
 - **Rich Tag Extraction & Clean Collaborations**: Sub-second parallel metadata indexing via [Lofty](https://github.com/Serial-ATA/lofty-rs) with standardized collaboration formatting (`Artist ft. Collaborator`).
 
@@ -72,7 +74,7 @@ Designed for keyboard-centric tiling window managers (Hyprland / Omarchy), Mixar
 | <kbd>→</kbd> | Seek forward (+5 seconds) |
 | <kbd>←</kbd> | Seek backward (-5 seconds) |
 | <kbd>/</kbd> | Focus instant search bar |
-| <kbd>Esc</kbd> | Clear search filter or return focus to list |
+| <kbd>Esc</kbd> | Clear search filter, return focus to list, or close an open menu/dialog |
 
 ---
 
