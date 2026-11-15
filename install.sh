@@ -52,8 +52,8 @@ PLUGIN_SRC="$(cd "$SRC_DIR" && pwd)"
 TARGET_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 
-RELEASE_TAG="v1.3.0"
-EXPECTED_SHA256="ad44910e04bc314ebe8e2aff966773a04ed515a10267026d6df16a11bf7e09e0"
+RELEASE_TAG="v1.4.0"
+EXPECTED_SHA256="5a8254bf01e78c25415d8178f8557fb60df042f3dcafd52e49de65d1585695c7"
 MAX_BYTES=10485760 # 10 MiB limit
 
 # --- Trusted tool resolution (executable-provenance boundary) ----------------
