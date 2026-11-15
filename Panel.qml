@@ -832,6 +832,11 @@ Panel {
           root.bootstrapDone()
           return
         }
+        if (exitCode === 0 && root.devBuildEnabled) {
+          root.devMode = true
+          root.bootstrapDone()
+          return
+        }
         // Missing, stale, or unverified binary: proceed with standard release download and verification
         root.runBootstrap("rm-bin", [root.tool("rm"), "-f", root.ctlPath])
         return
