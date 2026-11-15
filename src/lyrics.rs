@@ -41,12 +41,32 @@ fn parse_timestamp(ts: &str) -> Option<f64> {
     Some(mins * 60.0 + secs)
 }
 
+/// Resource bounds to prevent memory amplification / exhaustion on adversarial LRC files.
+const MAX_PARSED_LINES: usize = 2000;
+const MAX_TIMESTAMPS_PER_LINE: usize = 16;
+const MAX_LINE_TEXT_BYTES: usize = 1024;
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Parse raw lyrics text (LRC format or plain text) into a list of LyricLine.
 pub fn parse_lyrics_text(raw: &str) -> (bool, Vec<LyricLine>) {
     let mut parsed_lines = Vec::new();
     let mut has_timestamps = false;
 
     for line in raw.lines() {
+        if parsed_lines.len() >= MAX_PARSED_LINES {
+            break;
+        }
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -75,7 +95,9 @@ pub fn parse_lyrics_text(raw: &str) -> (bool, Vec<LyricLine>) {
             if let Some(close_bracket) = rest.find(']') {
                 let tag_content = &rest[1..close_bracket];
                 if let Some(ts) = parse_timestamp(tag_content) {
-                    line_timestamps.push(ts);
+                    if line_timestamps.len() < MAX_TIMESTAMPS_PER_LINE {
+                        line_timestamps.push(ts);
+                    }
                     rest = rest[close_bracket + 1..].trim_start();
                     continue;
                 }
@@ -85,17 +107,22 @@ pub fn parse_lyrics_text(raw: &str) -> (bool, Vec<LyricLine>) {
 
         if !line_timestamps.is_empty() {
             has_timestamps = true;
+            let bounded_text = truncate_utf8(rest, MAX_LINE_TEXT_BYTES);
             for ts in line_timestamps {
+                if parsed_lines.len() >= MAX_PARSED_LINES {
+                    break;
+                }
                 parsed_lines.push(LyricLine {
                     time: (ts * 100.0).round() / 100.0,
-                    text: rest.to_string(),
+                    text: bounded_text.to_string(),
                 });
             }
         } else {
             // Unsynced plain line
+            let bounded_plain = truncate_utf8(trimmed, MAX_LINE_TEXT_BYTES);
             parsed_lines.push(LyricLine {
                 time: -1.0,
-                text: trimmed.to_string(),
+                text: bounded_plain.to_string(),
             });
         }
     }
@@ -263,5 +290,35 @@ mod tests {
         assert_eq!(lines[0].text, "Repeated chorus");
         assert_eq!(lines[1].time, 30.00);
         assert_eq!(lines[1].text, "Repeated chorus");
+    }
+
+    #[test]
+    fn test_parse_lrc_amplification_bounded() {
+        // Construct an adversarial line with 1000 timestamps and a huge text payload (50 KiB)
+        let mut evil = String::new();
+        for _ in 0..1000 {
+            evil.push_str("[00:01.00]");
+        }
+        evil.push_str(&"A".repeat(50_000));
+
+        let (synced, lines) = parse_lyrics_text(&evil);
+        assert!(synced);
+        // Timestamps per line must be capped at 16
+        assert!(lines.len() <= 16);
+        // Text length must be bounded to at most 1024 bytes
+        for line in &lines {
+            assert!(line.text.len() <= 1024);
+        }
+    }
+
+    #[test]
+    fn test_parse_lrc_max_lines_bounded() {
+        let mut sample = String::new();
+        for i in 0..3000 {
+            sample.push_str(&format!("[00:{:02}.00] Line {}\n", i % 60, i));
+        }
+        let (synced, lines) = parse_lyrics_text(&sample);
+        assert!(synced);
+        assert_eq!(lines.len(), MAX_PARSED_LINES);
     }
 }
