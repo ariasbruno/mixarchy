@@ -5,13 +5,20 @@ All notable changes to Mixarchy will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-11-15
 
 ### Added
 - **Persistent Playlist Management**: Add backend and CLI operations to create empty M3U playlists, add or remove existing tracks, rename playlists, and delete playlists.
 - **Safe Playlist Mutations**: Validate display names (non-empty, no path separators, no control characters, no leading dot, so no hidden playlist file is created) and stored paths, reject collisions without overwriting files, preserve M3U comments and ordering, write changes atomically, and refresh the derived library index after accepted mutations.
 - **Queue Track Actions**: Add `queue-add` and `queue-play-next` backend and CLI operations that validate track files, update the persisted playback queue without interrupting the current song, and report coherent queue indexes.
 - **Playlist & Track Action UI**: Add a themed right-click song menu for adding songs to existing or new playlists, appending to the queue, playing next, and removing songs from an opened playlist; add rename/delete controls with confirmation, canonical-path playlist identity, truthful feedback, and library/active-state refreshes after accepted changes.
+
+### Fixed & Hardened
+- **Bounded LRC Parsing**: Hardened parser against memory amplification attacks by bounding parsed timestamps per line (16), maximum line text length (1024 bytes), and total parsed lines (2000).
+- **Clipboard Field Gating**: Gated QML text inputs with `readOnly: !activeFocus || !root.opened || !visible` to mitigate Wayland clipboard snooping when the panel is closed or inactive.
+- **PlainText Enforcement**: Enforced `Text.PlainText` format on dynamic track metadata, artists, lyrics, queue, and dialog labels to prevent remote image leakage via rich text HTML markup.
+- **Bootstrap Binary Fallback**: Fixed bootstrap failure path in `Panel.qml` so missing or untrusted binaries automatically trigger download and verification instead of failing silently.
+- **Navigation and Selection Disentanglement**: Disentangled playing track styling from keyboard navigation and mouse hover cursor in track and queue lists.
 
 ## [1.3.0] - 2026-11-08
 
