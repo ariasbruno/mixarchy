@@ -832,8 +832,8 @@ Panel {
           root.bootstrapDone()
           return
         }
-        root.bootError = "Mixarchy: binary verification failed (actual: " + actual + ", expected: " + root.expectedSha256 + ")"
-        console.warn("Mixarchy: binary check failed — stopping to avoid reload loop")
+        // Missing, stale, or unverified binary: proceed with standard release download and verification
+        root.runBootstrap("rm-bin", [root.tool("rm"), "-f", root.ctlPath])
         return
       }
       else if (step === "rm-bin") {
@@ -1532,6 +1532,13 @@ Panel {
     if (opened) {
       refreshStatus()
       if (root.tracks.length === 0) refreshLibrary()
+    } else {
+      if (typeof searchField !== "undefined" && searchField && searchField.activeFocus) {
+        searchField.focus = false
+      }
+      if (typeof playlistNamePopup !== "undefined" && playlistNamePopup && playlistNamePopup.opened) {
+        playlistNamePopup.close()
+      }
     }
   }
 
@@ -1911,6 +1918,7 @@ Panel {
 
               Text {
                 text: root.activePlaylistName
+                textFormat: Text.PlainText
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
                 font.weight: Font.Bold
@@ -1940,6 +1948,8 @@ Panel {
               TextField {
                 id: searchField
                 Layout.fillWidth: true
+                readOnly: !activeFocus || !root.opened || !visible
+                maximumLength: 256
                 placeholderText: "Search tracks, artists, albums... (/)"
                 text: root.searchFilter
                 onTextChanged: root.searchFilter = text
@@ -2031,6 +2041,7 @@ Panel {
 
               Text {
                 text: root.filteredTracks.length + " tracks" + ((root.searchFilter.trim() !== "" && root.lockSearchQueue) ? " · 󰌾 Locked" : "")
+                textFormat: Text.PlainText
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 color: Qt.darker(Commons.Color.foreground, 1.4)
@@ -2126,6 +2137,7 @@ Panel {
                     spacing: 0
                     Text {
                       text: modelData.title || modelData.filename
+                      textFormat: Text.PlainText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
                       font.weight: isCurrent ? Font.Bold : Font.Normal
@@ -2135,6 +2147,7 @@ Panel {
                     }
                     Text {
                       text: (modelData.artist || "Unknown") + (modelData.album ? (" · " + modelData.album) : "")
+                      textFormat: Text.PlainText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                       color: Qt.darker(Commons.Color.foreground, 1.4)
@@ -2145,6 +2158,7 @@ Panel {
 
                   Text {
                     text: modelData.duration_str || "0:00"
+                    textFormat: Text.PlainText
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                     color: Qt.darker(Commons.Color.foreground, 1.4)
@@ -2235,6 +2249,7 @@ Panel {
                     spacing: 0
                     Text {
                       text: modelData.name
+                      textFormat: Text.PlainText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
                       color: Commons.Color.foreground
@@ -2373,6 +2388,7 @@ Panel {
 
                   Text {
                     text: root.currentTrack ? (root.currentTrack.title || root.currentTrack.filename) : "No playback"
+                    textFormat: Text.PlainText
                     font.family: Style.font.family
                     font.pixelSize: Style.font.heading
                     font.weight: Font.Bold
@@ -2384,6 +2400,7 @@ Panel {
 
                   Text {
                     text: root.currentTrack ? (root.currentTrack.artist + (root.currentTrack.album ? (" · " + root.currentTrack.album) : "")) : ""
+                    textFormat: Text.PlainText
                     font.family: Style.font.family
                     font.pixelSize: Style.font.body
                     color: Qt.darker(Commons.Color.foreground, 1.4)
@@ -2545,6 +2562,7 @@ Panel {
                       anchors.verticalCenter: parent.verticalCenter
                       width: Math.max(100, Math.floor((parent.width - Style.space(48)) / 1.20))
                       text: modelData.text || "♪"
+                      textFormat: Text.PlainText
                       font.family: Style.font.family
                       font.pixelSize: Style.space(16)
                       font.weight: isCurrentLine ? Font.Bold : Font.Normal
@@ -2809,6 +2827,7 @@ Panel {
                           spacing: 0
                           Text {
                             text: modelData.title || modelData.filename
+                            textFormat: Text.PlainText
                             font.family: Style.font.family
                             font.pixelSize: Style.font.body
                             font.weight: isCurrentInQueue ? Font.Bold : Font.Normal
@@ -2818,6 +2837,7 @@ Panel {
                           }
                           Text {
                             text: (modelData.artist || "Unknown")
+                            textFormat: Text.PlainText
                             font.family: Style.font.family
                             font.pixelSize: Style.font.caption
                             color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
@@ -2829,6 +2849,7 @@ Panel {
                         Text {
                           visible: !isUpcoming || !rowHover.hovered
                           text: modelData.duration_str || "0:00"
+                          textFormat: Text.PlainText
                           font.family: Style.font.family
                           font.pixelSize: Style.font.caption
                           color: isPastInQueue ? Qt.darker(Commons.Color.foreground, 1.8) : Qt.darker(Commons.Color.foreground, 1.4)
@@ -3023,6 +3044,7 @@ Panel {
 
                     Text {
                       text: root.currentTrack ? (root.currentTrack.title || root.currentTrack.filename) : "No playback"
+                      textFormat: Text.PlainText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
                       font.weight: Font.Bold
@@ -3035,6 +3057,7 @@ Panel {
                       text: root.currentTrack
                         ? root.currentTrack.artist
                         : (root.trackCount + " tracks available")
+                      textFormat: Text.PlainText
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                       color: Qt.darker(Commons.Color.foreground, 1.4)
@@ -3227,9 +3250,9 @@ Panel {
 
     background: Rectangle {
       radius: Style.cornerRadius
-      color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+      color: Commons.Color.popups.background
       border.width: 1
-      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+      border.color: Commons.Color.popups.border
     }
 
     contentItem: ColumnLayout {
@@ -3318,6 +3341,7 @@ Panel {
             anchors.rightMargin: Style.space(8)
             verticalAlignment: Text.AlignVCenter
             text: playlistMenuItem.modelData.name
+            textFormat: Text.PlainText
             elide: Text.ElideRight
             font.family: Style.font.family
             font.pixelSize: Style.font.body
@@ -3401,14 +3425,15 @@ Panel {
       playlistNameField.forceActiveFocus()
     }
     onClosed: {
+      playlistNameField.focus = false
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     }
 
     background: Rectangle {
       radius: Style.cornerRadius
-      color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+      color: Commons.Color.popups.background
       border.width: 1
-      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+      border.color: Commons.Color.popups.border
     }
 
     contentItem: ColumnLayout {
@@ -3416,6 +3441,7 @@ Panel {
 
       Text {
         Layout.fillWidth: true
+        textFormat: Text.PlainText
         text: playlistNamePopup.mode === "rename"
           ? "Rename playlist"
           : (playlistNamePopup.mode === "create"
@@ -3429,6 +3455,7 @@ Panel {
 
       Text {
         Layout.fillWidth: true
+        textFormat: Text.PlainText
         text: playlistNamePopup.mode === "create"
           ? "Create a playlist and add “" + playlistNamePopup.pendingTrackTitle + "”."
           : (playlistNamePopup.mode === "rename"
@@ -3443,6 +3470,8 @@ Panel {
       TextField {
         id: playlistNameField
         Layout.fillWidth: true
+        readOnly: !activeFocus || !playlistNamePopup.opened || !visible
+        maximumLength: 64
         placeholderText: "Playlist name"
         Keys.onReturnPressed: function(event) {
           root.submitPlaylistNameDialog()
@@ -3514,9 +3543,9 @@ Panel {
 
     background: Rectangle {
       radius: Style.cornerRadius
-      color: Style.normalFillFor(root.foreground, Commons.Color.accent)
+      color: Commons.Color.popups.background
       border.width: 1
-      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.22)
+      border.color: Commons.Color.popups.border
     }
 
     contentItem: ColumnLayout {
@@ -3533,6 +3562,7 @@ Panel {
 
       Text {
         Layout.fillWidth: true
+        textFormat: Text.PlainText
         text: "Permanently delete “" + deletePlaylistPopup.pendingPlaylistName + "”? This cannot be undone."
         wrapMode: Text.WordWrap
         font.family: Style.font.family
