@@ -146,6 +146,7 @@ Panel {
   property bool lockSearchQueue: false
   property string sortMode: "artist" // "artist" | "album" | "title" | "recent" | "duration"
   property bool sortAsc: true
+  property bool keyboardNavActive: false
 
   readonly property var sortModes: [
     { id: "artist", label: "Artist", icon: "󰠃" },
@@ -1730,7 +1731,9 @@ Panel {
         }
         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
           if (root.currentScreen === "tracks") {
-            root.playTrackAtIndex(tracksListView.currentIndex)
+            if (tracksListView.currentIndex >= 0 && tracksListView.currentIndex < tracksListView.count) {
+              root.playTrackAtIndex(tracksListView.currentIndex)
+            }
             event.accepted = true
             return
           } else if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
@@ -1744,16 +1747,19 @@ Panel {
           }
         }
         if (event.key === Qt.Key_Down || event.text === "j") {
+          root.keyboardNavActive = true
           if (root.currentScreen === "tracks") {
-            if (tracksListView.currentIndex + 1 < tracksListView.count) {
-              tracksListView.currentIndex++
+            var nextTrack = tracksListView.currentIndex < 0 ? 0 : tracksListView.currentIndex + 1
+            if (nextTrack < tracksListView.count) {
+              tracksListView.currentIndex = nextTrack
               tracksListView.positionViewAtIndex(tracksListView.currentIndex, ListView.Contain)
             }
             event.accepted = true
             return
           } else if (root.currentScreen === "nowplaying" && root.nowPlayingSubTab === "queue") {
-            if (queueListView.currentIndex + 1 < queueListView.count) {
-              queueListView.currentIndex++
+            var nextQ = queueListView.currentIndex < 0 ? 0 : queueListView.currentIndex + 1
+            if (nextQ < queueListView.count) {
+              queueListView.currentIndex = nextQ
               queueListView.positionViewAtIndex(queueListView.currentIndex, ListView.Contain)
             }
             event.accepted = true
@@ -1761,6 +1767,7 @@ Panel {
           }
         }
         if (event.key === Qt.Key_Up || event.text === "k") {
+          root.keyboardNavActive = true
           if (root.currentScreen === "tracks") {
             if (tracksListView.currentIndex > 0) {
               tracksListView.currentIndex--
@@ -2060,6 +2067,7 @@ Panel {
               Layout.fillHeight: true
               Layout.minimumHeight: Style.space(250)
               clip: true
+              currentIndex: -1
               model: root.filteredTracks
               spacing: Style.space(3)
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -2068,6 +2076,7 @@ Panel {
                 required property var modelData
                 required property int index
                 readonly property bool isCurrent: root.currentTrack && root.currentTrack.path === modelData.path
+                readonly property bool isNavFocused: root.keyboardNavActive && tracksListView.currentIndex === index
 
                 // ListView creates delegates only for visible rows, so this
                 // fires at most once per visible row; requestCover dedupes.
@@ -2076,12 +2085,18 @@ Panel {
                 width: tracksListView.width
                 implicitHeight: Style.space(38)
                 radius: Style.cornerRadius
-                borderSpec: isCurrent || trackArea.containsMouse || tracksListView.currentIndex === index
-                  ? Border.controlSpec((isCurrent || tracksListView.currentIndex === index) ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
-                  : Border.none()
-                color: (isCurrent || tracksListView.currentIndex === index)
+                borderSpec: isCurrent
+                  ? Border.controlSpec("selected", root.foreground, Commons.Color.accent)
+                  : (isNavFocused
+                      ? Border.controlSpec("focus", root.foreground, Commons.Color.accent)
+                      : (trackArea.containsMouse
+                          ? Border.controlSpec("hover-cursor", root.foreground, Commons.Color.accent)
+                          : Border.none()))
+                color: isCurrent
                   ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
-                  : (trackArea.containsMouse ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
+                  : (isNavFocused || trackArea.containsMouse
+                      ? Style.hoverFillFor(root.foreground, Commons.Color.accent)
+                      : "transparent")
 
                 RowLayout {
                   anchors.fill: parent
@@ -2176,7 +2191,9 @@ Panel {
                   acceptedButtons: Qt.LeftButton | Qt.RightButton
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
+                  onPositionChanged: root.keyboardNavActive = false
                   onClicked: function(mouse) {
+                    root.keyboardNavActive = false
                     if (mouse.button === Qt.RightButton) {
                       // Context actions must never enter the normal left-click
                       // playback path.
@@ -2666,6 +2683,7 @@ Panel {
                   id: queueListView
                   anchors.fill: parent
                   clip: true
+                  currentIndex: -1
                   spacing: Style.space(3)
                   ScrollBar.vertical: ScrollBar {
                     id: queueScrollBar
@@ -2754,11 +2772,13 @@ Panel {
                       required property var modelData
                       required property int index
                       readonly property bool isCurrentInQueue: index === root.queueIndex
+                      readonly property bool isNavFocused: root.keyboardNavActive && queueListView.currentIndex === index
                       readonly property bool isPastInQueue: root.queueIndex >= 0 && index < root.queueIndex
                       readonly property bool isUpcoming: root.queueIndex >= 0 && index > root.queueIndex
 
                       HoverHandler {
                         id: rowHover
+                        onHoveredChanged: if (hovered) root.keyboardNavActive = false
                       }
 
                       Component.onCompleted: {
@@ -2771,12 +2791,18 @@ Panel {
                       opacity: isPastInQueue ? (rowHover.hovered ? 0.8 : 0.45) : 1.0
                       Behavior on opacity { NumberAnimation { duration: 150 } }
 
-                      borderSpec: isCurrentInQueue || rowHover.hovered || queueListView.currentIndex === index
-                        ? Border.controlSpec((isCurrentInQueue || queueListView.currentIndex === index) ? "focus" : "hover-cursor", root.foreground, Commons.Color.accent)
-                        : Border.none()
-                      color: (isCurrentInQueue || queueListView.currentIndex === index)
+                      borderSpec: isCurrentInQueue
+                        ? Border.controlSpec("selected", root.foreground, Commons.Color.accent)
+                        : (isNavFocused
+                            ? Border.controlSpec("focus", root.foreground, Commons.Color.accent)
+                            : (rowHover.hovered
+                                ? Border.controlSpec("hover-cursor", root.foreground, Commons.Color.accent)
+                                : Border.none()))
+                      color: isCurrentInQueue
                         ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
-                        : (rowHover.hovered ? Style.hoverFillFor(root.foreground, Commons.Color.accent) : "transparent")
+                        : (isNavFocused || rowHover.hovered
+                            ? Style.hoverFillFor(root.foreground, Commons.Color.accent)
+                            : "transparent")
 
                       RowLayout {
                         anchors.fill: parent
